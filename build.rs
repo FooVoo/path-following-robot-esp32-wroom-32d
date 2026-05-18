@@ -1,7 +1,20 @@
 fn main() {
-    linker_be_nice();
-    // make sure linkall.x is the last linker script (otherwise might cause problems with flip-link)
-    println!("cargo:rustc-link-arg=-Tlinkall.x");
+    // Generate Rust types from the protobuf schema.
+    // Output goes to $OUT_DIR/robot_telemetry.rs and is included via
+    // `include!` in `src/proto/mod.rs`.
+    prost_build::Config::new()
+        .out_dir(std::env::var("OUT_DIR").unwrap())
+        .compile_protos(&["proto/telemetry.proto"], &["proto/"])
+        .expect("prost_build failed");
+
+    // Only add ESP32-specific linker scripts when targeting the Xtensa
+    // architecture.  For host builds (e.g. `cargo test --target aarch64-apple-darwin`),
+    // these flags are invalid and would cause linker errors.
+    if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("xtensa") {
+        linker_be_nice();
+        // `linkall.x` must be the last linker script; see esp-hal docs.
+        println!("cargo:rustc-link-arg=-Tlinkall.x");
+    }
 }
 
 fn linker_be_nice() {

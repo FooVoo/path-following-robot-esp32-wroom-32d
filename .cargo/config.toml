@@ -1,14 +1,27 @@
 [target.xtensa-esp32-none-elf]
-runner = "espflash flash --monitor --chip esp32"
-
-[env]
-
-[build]
+runner  = "espflash flash --monitor --chip esp32"
+# ESP32-specific rustflag: remove default C startup files (handled by esp-hal).
 rustflags = [
   "-C", "link-arg=-nostartfiles",
 ]
 
+[env]
+
+[build]
 target = "xtensa-esp32-none-elf"
 
 [unstable]
-build-std = ["core"]
+build-std = ["core", "alloc"]
+
+# ── Aliases ──────────────────────────────────────────────────────────────────
+
+# Run unit tests on the host (Apple Silicon M-series) without ESP32 hardware.
+# Adapters are excluded from this build (gated on target_arch = "xtensa").
+#
+# Run via rustup so the +stable override is honoured:
+#   rustup run stable cargo test-host
+#
+# Or equivalently (when cargo is rustup's proxy shim):
+#   cargo +stable test-host
+[alias]
+test-host = "+stable test --lib --target aarch64-apple-darwin"

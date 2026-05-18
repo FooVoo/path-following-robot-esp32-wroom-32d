@@ -1,30 +1,108 @@
 [package]
 edition      = "2024"
-name         = "my-esp-project"
+name         = "path-following-robot"
 rust-version = "1.88"
 version      = "0.1.0"
 
 [[bin]]
-name = "my-esp-project"
+name = "path-following-robot"
 path = "./src/bin/main.rs"
 
+# ── Host-side telemetry server (build with `--features host-server`) ──────────
+#
+# Only compiled for the host target.  The `required-features` guard prevents
+# this binary from being included in an ESP32 build where axum/tokio are absent.
+#
+# Build:
+#   cargo build --features host-server --bin telemetry-server
+#
+# Run:
+#   HOST_IP=0.0.0.0 HTTP_PORT=8080 cargo run --features host-server --bin telemetry-server
+[[bin]]
+name = "telemetry-server"
+path = "src/bin/telemetry_server.rs"
+required-features = ["host-server"]
+
+[lib]
+name = "path_following_robot"
+path = "./src/lib.rs"
+
+# ── Feature flags ──────────────────────────────────────────────────────────────
+[features]
+# Enables the host-side axum telemetry server binary.
+# Do NOT enable when cross-compiling for the ESP32 target.
+host-server = [
+    "dep:axum",
+    "dep:tokio",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:tracing",
+    "dep:tracing-subscriber",
+    "dep:sqlx",
+    "dep:tokio-stream",
+    "dep:chrono",
+    "dep:async-trait",
+    "dep:bytes",
+    "prost/std",
+]
+
+# ── Dependencies available on ALL targets (including the host for tests) ──────
 [dependencies]
-esp-hal = { version = "~1.1.0", features = ["esp32"] }
+log      = { version = "0.4", default-features = false }
+heapless = "0.8"
+nb       = "1.1"
+# Protobuf runtime — used by ESP32 (encoding) and host server (decoding).
+# no_std-compatible; requires alloc (provided by esp-alloc on ESP32).
+prost    = { version = "0.13", default-features = false, features = ["prost-derive"] }
 
+# ── Host-side telemetry server dependencies (opt-in via `host-server` feature) ─
+axum                = { version = "0.8",  optional = true }
+tokio               = { version = "1",    features = ["full"], optional = true }
+serde               = { version = "1",    features = ["derive"], optional = true }
+serde_json          = { version = "1",    optional = true }
+tracing             = { version = "0.1",  optional = true }
+tracing-subscriber  = { version = "0.3",  features = ["env-filter"], optional = true }
+sqlx                = { version = "0.8",  features = ["runtime-tokio-native-tls", "postgres", "chrono", "json"], optional = true }
+tokio-stream        = { version = "0.1",  features = ["sync"], optional = true }
+chrono              = { version = "0.4",  features = ["serde"], optional = true }
+async-trait         = { version = "0.1",  optional = true }
+bytes               = { version = "1",    optional = true }
 
-esp-bootloader-esp-idf = { version = "0.5.0", features = ["esp32"] }
+[build-dependencies]
+prost-build = "0.13"
 
-critical-section = "1.2.0"
+[dev-dependencies]
+# Used by server integration tests (axum Router::oneshot).
+tower = { version = "0.5", features = ["util"] }
 
+# ── ESP32 / Xtensa-only dependencies ─────────────────────────────────────────
+# esp-hal's build.rs panics when the target is not Xtensa, so these must be
+# kept out of `[dependencies]` to allow `cargo test --lib --target aarch64-apple-darwin`.
+[target.'cfg(target_arch = "xtensa")'.dependencies]
+esp-hal                = { version = "=1.1.1", features = ["esp32", "unstable"] }
+esp-bootloader-esp-idf = { version = "0.5.0",  features = ["esp32"] }
+# esp-println: UART0 serial debug output; registers itself as the log backend
+esp-println            = { version = "0.17", features = ["esp32", "log-04"] }
+critical-section       = "1.2.0"
+# ── WiFi + networking ────────────────────────────────────────────────────────
+# esp-radio 0.18 is the renamed successor to esp-wifi; it requires esp-hal ~1.1
+# and shares the same xtensa-lx-rt 0.22.x, so there are no `links` conflicts.
+# esp-rtos provides the RTOS scheduler required to run WiFi background tasks.
+# embassy-net-driver is needed to use WifiRxToken/WifiTxToken consume() traits
+# in the smoltcp bridge.
+esp-radio         = { version = "0.18", features = ["esp32", "wifi"] }
+esp-rtos          = { version = "0.3", features = ["esp32"] }
+embassy-net-driver = "0.2"
+esp-alloc         = "0.10"
+smoltcp      = { version = "0.12", default-features = false, features = [
+"alloc", "proto-ipv4", "socket-udp", "socket-dhcpv4", "medium-ethernet"] }
 
-# For fine tuning these settings, please refer to https://doc.rust-lang.org/cargo/reference/profiles.html
 [profile.dev]
-# The default debug profile is too slow and too big for resource-constrained devices.
-# Always build with some optimizations enabled.
+# Always build with some optimisations – unoptimised code is too large for flash.
 opt-level = "s"
 
 [profile.release]
-codegen-units = 1     # LLVM can perform better optimizations using a single thread
-debug         = 2     # prefer slower builds but better debugging experience
+codegen-units = 1     # single-unit LTO for best code size
+debug         = 2     # full debug symbols (stripped by espflash at flash time)
 lto           = 'fat'
 opt-level     = 's'

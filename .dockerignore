@@ -1,0 +1,13 @@
+# Compiled artifacts (large – never copy into Docker image)
+target/
+
+# Git internals
+.git/
+
+# ESP-IDF / xtensa toolchains downloaded by espup
+~/.rustup/toolchains/esp/
+
+# Editor / OS noise
+.idea/
+.DS_Store
+*.iml

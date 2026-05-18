@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package robot_telemetry;
+
+// Telemetry frame broadcast by the robot over UDP.
+//
+// Replaces the previous ~100-byte JSON encoding.
+// Binary protobuf is ~15–25 bytes per frame (8–10× smaller).
+//
+// Wire compatibility: server checks the first byte; values ≥ 0x80 (varint)
+// indicate protobuf; `{` (0x7B) means legacy JSON for backwards compatibility.
+message TelemetryFrame {
+  // Current FSM state name: "IDLE", "RECORD", "READY", "PLAY", "AVOIDING", "HALT".
+  string state = 1;
+
+  // Left LIDAR distance in cm.  -1 means stale / sensor absent.
+  sint32 lidar_left_cm = 2;
+
+  // Right LIDAR distance in cm.  -1 means stale / sensor absent.
+  sint32 lidar_right_cm = 3;
+
+  // Left-motor throttle [-100, 100].
+  sint32 throttle_left = 4;
+
+  // Right-motor throttle [-100, 100].
+  sint32 throttle_right = 5;
+
+  // Milliseconds since robot boot.
+  uint64 uptime_ms = 6;
+
+  // DHCP-assigned IPv4 address, e.g. "192.168.1.42".
+  // The server uses this to identify the robot when the UDP source address
+  // is unavailable (e.g. behind NAT) or for cross-validation.
+  string robot_ip = 7;
+}

@@ -1,0 +1,47 @@
+services:
+  # ─── PostgreSQL ─────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: robots
+      POSTGRES_PASSWORD: robots
+      POSTGRES_DB: robots
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U robots -d robots"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ─── Telemetry server ────────────────────────────────────────────────────────
+  telemetry-server:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8080:8080"        # HTTP UI + REST API
+      - "9001:9001/udp"    # Robot UDP telemetry frames
+    environment:
+      DATABASE_URL: postgres://robots:robots@postgres:5432/robots
+      HTTP_PORT: "8080"
+      RUST_LOG: "info"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # ── NOTE: UDP broadcast reception ──────────────────────────────────────────
+    # By default the container is on a bridge network and will NOT receive
+    # 255.255.255.255 broadcast frames from robots on your LAN.
+    #
+    # Option A – robot sends unicast directly to the host IP → works as-is.
+    #
+    # Option B – you need broadcast support (Linux hosts only):
+    #   1. Uncomment the line below.
+    #   2. Change DATABASE_URL to use your host IP instead of "postgres".
+    #      e.g.  DATABASE_URL: postgres://robots:robots@127.0.0.1:5432/robots
+    # network_mode: host
+
+volumes:
+  postgres_data:
