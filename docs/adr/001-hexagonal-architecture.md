@@ -37,17 +37,25 @@ src/
 ├── domain/          # Pure Rust — no esp-hal, no alloc, no std
 │   ├── state.rs
 │   ├── path.rs
-│   └── robot.rs     # Robot<M, L, I, W> — all generics, no concrete types
+│   └── robot.rs     # Robot<M, L, I, W, D> — all generics, no concrete types
 ├── ports/           # Trait definitions — the "hexagon's edge"
 │   ├── motors.rs
 │   ├── distance.rs
 │   ├── input.rs
 │   ├── remote_control.rs
-│   └── telemetry.rs
+│   ├── telemetry.rs
+│   ├── display.rs   # DisplayPort trait (added with SSD1306 / LCD1602 support)
+│   └── stepper.rs   # StepperPort trait (added with ULN2003 stepper support)
 └── adapters/
-    └── esp32/       # Concrete esp-hal bindings — xtensa-only
+    └── esp32/       # Concrete esp-hal bindings — xtensa + riscv32 gated
         ├── drv8833.rs
-        ├── tf_luna.rs
+        ├── tf_luna.rs         # TF-Luna UART LIDAR (legacy / fallback)
+        ├── vl53l0x.rs         # VL53L0X on TCA9548A mux (primary LIDAR)
+        ├── vl53l0x_direct.rs  # VL53L0X on direct I2C bus (single-sensor builds)
+        ├── tca9548a.rs        # TCA9548A I2C multiplexer driver
+        ├── lcd1602.rs         # LCD1602 character display over I2C
+        ├── ssd1306_oled.rs    # SSD1306 OLED display over I2C
+        ├── uln2003.rs         # ULN2003 stepper motor driver
         ├── joystick.rs
         └── wifi.rs
 ```
@@ -55,7 +63,9 @@ src/
 ### Key rules
 
 1. **The domain imports nothing from `esp-hal`.**  The entire `adapters/esp32/`
-   subtree is gated with `#[cfg(target_arch = "xtensa")]` in `src/lib.rs`.
+   subtree is gated with `#[cfg(any(target_arch = "xtensa", target_arch = "riscv32"))]`
+   in `src/lib.rs`, keeping both the ESP32 (Xtensa) and ESP32-C3/S3 (RISC-V) targets
+   supported while still producing a host-testable crate.
 
 2. **Ports are traits only.**  A port trait has no associated data, no default
    implementations, and no hardware-specific types in its signature.
@@ -76,12 +86,13 @@ src/
 The `Robot` struct is generic over its port implementations:
 
 ```rust
-pub struct Robot<M, L, I, W = NoWifi>
+pub struct Robot<M, L, I, W = NoWifi, D = NoDisplay>
 where
     M: MotorPort,
     L: DistancePort,
     I: InputPort,
     W: RemoteControlPort + TelemetryPort,
+    D: DisplayPort,
 { ... }
 ```
 
@@ -94,19 +105,21 @@ Generics were chosen over trait objects (`dyn Trait`) because:
 - The firmware only ever constructs one `Robot` instance, so code-size
   duplication from monomorphisation is not a concern.
 
-### `W = NoWifi` default
+### `W = NoWifi`, `D = NoDisplay` defaults
 
 Existing test code uses the three-generic form
-`Robot<MockMotors, MockDistance, MockInput>`.  Adding the fourth `W` generic
-with a `NoWifi` default means all 19 tests continue to compile and pass
-without any test-file changes.
+`Robot<MockMotors, MockDistance, MockInput>`.  Adding `W` and `D` as generic
+parameters with `NoWifi` / `NoDisplay` zero-sized-type defaults means all 88
+tests continue to compile and pass without any test-file changes.
 
 ```rust
-/// Zero-sized type that implements RemoteControlPort + TelemetryPort as no-ops.
+/// Zero-sized types that implement their ports as silent no-ops.
 pub struct NoWifi;
+pub struct NoDisplay;
 
 impl RemoteControlPort for NoWifi { /* all methods return None / false */ }
 impl TelemetryPort    for NoWifi { fn send(&mut self, _: &TelemetryFrame) {} }
+impl DisplayPort      for NoDisplay { /* all methods are no-ops */ }
 ```
 
 ---
@@ -115,7 +128,7 @@ impl TelemetryPort    for NoWifi { fn send(&mut self, _: &TelemetryFrame) {} }
 
 **Positive**
 
-- `cargo +stable test --lib --target aarch64-apple-darwin` runs 19 tests in
+- `cargo +stable test --lib --target aarch64-apple-darwin` runs 88 tests in
   ~5 seconds without a connected ESP32.
 - Adding a new hardware driver requires only:
   1. Implement the relevant port trait in a new file under `adapters/esp32/`
@@ -130,7 +143,7 @@ impl TelemetryPort    for NoWifi { fn send(&mut self, _: &TelemetryFrame) {} }
 
 - Boilerplate: a new hardware sensor requires both a port trait and an adapter
   struct, even for simple cases.
-- The four-generic `Robot<M, L, I, W>` signature is verbose in `main.rs`;
+- The five-generic `Robot<M, L, I, W, D>` signature is verbose in `main.rs`;
   the compiler message for a missing trait bound can be long.
 - `block_on` spin-loops (used in the WiFi adapter) are harder to test than
   async code; this is a deliberate choice — see ADR-002.

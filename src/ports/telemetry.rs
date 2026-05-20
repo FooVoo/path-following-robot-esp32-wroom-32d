@@ -4,6 +4,15 @@
 ///
 /// `state_name` is `&'static str` so that `TelemetryFrame` is `Copy`, heap-free,
 /// and safe to use in `#![no_std]` contexts.
+///
+/// # Note on `robot_ip`
+///
+/// This struct intentionally omits the robot's IP address.  IP assignment is a
+/// network concern, not a domain concern.  The concrete adapter that implements
+/// `TelemetryPort` (e.g. `WifiAdapter`) is responsible for injecting the
+/// DHCP-assigned IP when encoding the wire frame (e.g. into the
+/// `proto::TelemetryFrame::robot_ip` field).  The domain layer never needs to
+/// know its own IP.
 #[derive(Clone, Copy, Debug)]
 pub struct TelemetryFrame {
     /// Current FSM state name: `"IDLE"`, `"RECORD"`, `"READY"`, `"PLAY"`,

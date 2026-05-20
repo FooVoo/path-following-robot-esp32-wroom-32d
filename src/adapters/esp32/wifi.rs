@@ -8,7 +8,7 @@
 //!         └─ parse 4-byte command       ← fills pending_throttle / pending_button
 //!
 //!  Robot::tick() (telemetry path)
-//!    └─ wifi.send(&frame)               ← rate-limited UDP broadcast of JSON
+//!    └─ wifi.send(&frame)               ← UDP broadcast of protobuf TelemetryFrame
 //!
 //!  Robot::tick_idle / tick_ready
 //!    └─ wifi.poll_button()              ← consume pending remote button
@@ -27,23 +27,25 @@
 //!   0x02  button     — v1, v2 ignored
 //! ```
 //!
-//! **Telemetry ← robot (UDP limited-broadcast port [`WIFI_TEL_PORT`]), ~100 bytes JSON:**
+//! **Telemetry ← robot (UDP limited-broadcast port [`WIFI_TEL_PORT`]), ~15–25 bytes protobuf:**
 //!
-//! ```text
-//! {"s":"PLAY","ll":125,"lr":98,"tl":50,"tr":50,"ms":12345,"ip":"192.168.1.42"}
-//! ```
+//! Encoded as `proto::TelemetryFrame` (see `proto/telemetry.proto`).
+//! Fields: `state`, `lidar_left_cm`, `lidar_right_cm`, `throttle_left`,
+//! `throttle_right`, `uptime_ms`, `robot_ip`.
 //!
-//! `ll`/`lr` = LIDAR distances in cm, or -1 when the sensor is stale/absent.  
-//! `tl`/`tr` = last motor throttle in \[-100, 100\].  
-//! `ms`      = uptime in milliseconds.
-//! `ip`      = robot's current IPv4 address (DHCP-assigned).
+//! LIDAR distances use `-1` as the sentinel for a stale or absent sensor.
+//! `robot_ip` is the DHCP-assigned IPv4 address injected by the adapter so
+//! the server can discover the robot without manual configuration.
+//!
+//! The server still accepts legacy JSON frames (first byte `{`) for
+//! backwards compatibility with older firmware.
 //!
 //! # IP address
 //!
-//! The robot obtains its IP via DHCP on startup.  The assigned address is
-//! embedded in every telemetry frame as the `"ip"` field, allowing the
-//! host-side `telemetry-server` to discover the robot dynamically without
-//! any manual configuration.  Telemetry frames are broadcast to
+//! The robot obtains its IP via DHCP on startup.  The adapter injects the
+//! assigned address into the `robot_ip` field of each `proto::TelemetryFrame`,
+//! allowing the host-side `telemetry-server` to discover the robot dynamically
+//! without any manual configuration.  Telemetry frames are broadcast to
 //! `255.255.255.255` (limited broadcast) so they reach all hosts on the
 //! local subnet regardless of the robot's assigned address.
 //!
@@ -55,7 +57,6 @@ extern crate alloc;
 use alloc::vec;
 
 use core::{
-    fmt::Write as FmtWrite,
     future::Future,
     pin::Pin,
     task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
@@ -66,7 +67,6 @@ use esp_radio::wifi::{
     Config, ControllerConfig, Interface as RadioInterface, WifiController, WifiRxToken, WifiTxToken,
     sta::StationConfig,
 };
-use heapless::String as HString;
 use log::{error, info, trace, warn};
 use smoltcp::{
     iface::{Config as SmoltcpConfig, Interface, SocketHandle, SocketSet},
@@ -81,7 +81,7 @@ use smoltcp::{
 
 use crate::{
     config::{
-        TELEMETRY_INTERVAL_MS, WIFI_CMD_PORT, WIFI_DHCP_TIMEOUT_MS, WIFI_PASSWORD, WIFI_SSID,
+        WIFI_CMD_PORT, WIFI_DHCP_TIMEOUT_MS, WIFI_PASSWORD, WIFI_SSID,
         WIFI_TEL_PORT,
     },
     ports::{
@@ -199,8 +199,6 @@ struct WifiAdapterInner {
     pending_throttle: Option<(i8, i8)>,
     /// Pending remote button press; consumed by `poll_button()`.
     pending_button: bool,
-    /// `uptime_ms` when the last telemetry frame was sent (rate-limiting).
-    last_tel_ms: u64,
     /// IPv4 address assigned by DHCP; embedded in every telemetry frame.
     assigned_ip: [u8; 4],
 }
@@ -334,7 +332,7 @@ impl WifiAdapter {
         let cmd_tx_buf = PacketBuffer::new(vec![PacketMetadata::EMPTY; 1], vec![0u8; 64]);
         let cmd_socket = UdpSocket::new(cmd_rx_buf, cmd_tx_buf);
 
-        // Send socket for ~100-byte JSON telemetry frames.
+        // Send socket for protobuf telemetry frames (~15–25 bytes encoded).
         let tel_rx_buf = PacketBuffer::new(vec![PacketMetadata::EMPTY; 1], vec![0u8; 64]);
         let tel_tx_buf = PacketBuffer::new(vec![PacketMetadata::EMPTY; 4], vec![0u8; 512]);
         let tel_socket = UdpSocket::new(tel_rx_buf, tel_tx_buf);
@@ -369,7 +367,6 @@ impl WifiAdapter {
             tel_handle,
             pending_throttle: None,
             pending_button: false,
-            last_tel_ms: 0,
             assigned_ip,
         })
     }
@@ -415,55 +412,39 @@ impl WifiAdapter {
         }
     }
 
-    /// Format and emit a telemetry JSON frame via UDP limited broadcast.
+    /// Encode and emit a protobuf `TelemetryFrame` via UDP limited broadcast.
     ///
     /// Broadcasts to `255.255.255.255` so the frame reaches the host-side
     /// `telemetry-server` on the same LAN regardless of subnet configuration.
-    /// The robot's DHCP-assigned IP is embedded in the `"ip"` field so the
-    /// server can discover the robot dynamically.
+    /// `robot_ip` is injected from `inner.assigned_ip` here — it is absent from
+    /// the port-trait `TelemetryFrame` because IP assignment is a network
+    /// concern, not a domain concern.
     fn send_telemetry(inner: &mut WifiAdapterInner, frame: &TelemetryFrame) {
-        // Rate-limit: do not send more often than TELEMETRY_INTERVAL_MS.
-        if frame.uptime_ms.saturating_sub(inner.last_tel_ms) < TELEMETRY_INTERVAL_MS {
-            return;
-        }
+        use prost::Message as _;
 
-        // Build compact JSON in a stack-allocated 256-byte string.
-        // Worst-case size: ~99 chars (AVOIDING state + max u64 uptime + IPv4).
-        let mut json: HString<256> = HString::new();
-        let ll = frame.lidar_l_cm.map_or(-1i32, |v| v as i32);
-        let lr = frame.lidar_r_cm.map_or(-1i32, |v| v as i32);
         let [ia, ib, ic, id] = inner.assigned_ip;
-        if write!(
-            json,
-            r#"{{"s":"{}","ll":{},"lr":{},"tl":{},"tr":{},"ms":{},"ip":"{}.{}.{}.{}"}}"#,
-            frame.state_name,
-            ll,
-            lr,
-            frame.throttle_l,
-            frame.throttle_r,
-            frame.uptime_ms,
-            ia, ib, ic, id,
-        )
-        .is_err()
-        {
-            warn!("WiFi TEL: JSON format overflow");
-            return;
-        }
+        let proto_frame = crate::proto::TelemetryFrame {
+            state:          alloc::string::String::from(frame.state_name),
+            lidar_left_cm:  frame.lidar_l_cm.map_or(-1, |v| v as i32),
+            lidar_right_cm: frame.lidar_r_cm.map_or(-1, |v| v as i32),
+            throttle_left:  frame.throttle_l as i32,
+            throttle_right: frame.throttle_r as i32,
+            uptime_ms:      frame.uptime_ms,
+            robot_ip:       alloc::format!("{}.{}.{}.{}", ia, ib, ic, id),
+        };
+        let encoded = proto_frame.encode_to_vec();
 
         // Send to limited broadcast — works on any subnet without knowing the
         // broadcast address ahead of time.
-        let dest: IpEndpoint = IpEndpoint {
+        let dest = IpEndpoint {
             addr: IpAddress::Ipv4(Ipv4Address::BROADCAST),
             port: WIFI_TEL_PORT,
         };
 
         let sock = inner.sockets.get_mut::<UdpSocket>(inner.tel_handle);
         if sock.can_send() {
-            match sock.send_slice(json.as_bytes(), dest) {
-                Ok(()) => {
-                    trace!("WiFi TEL: {}", json.as_str());
-                    inner.last_tel_ms = frame.uptime_ms;
-                }
+            match sock.send_slice(&encoded, dest) {
+                Ok(()) => trace!("WiFi TEL: {} B protobuf", encoded.len()),
                 Err(e) => warn!("WiFi TEL: send_slice error: {:?}", e),
             }
         } else {
@@ -505,13 +486,11 @@ impl RemoteControlPort for WifiAdapter {
 }
 
 impl TelemetryPort for WifiAdapter {
-    /// Broadcast a telemetry JSON frame over UDP.
+    /// Broadcast a protobuf-encoded `TelemetryFrame` over UDP to
+    /// `255.255.255.255` (limited broadcast).
     ///
-    /// Rate-limited internally to [`TELEMETRY_INTERVAL_MS`]; calling more
-    /// frequently is harmless.  The frame includes the robot's DHCP-assigned
-    /// IP so the host server can discover the robot automatically.
-    ///
-    /// [`TELEMETRY_INTERVAL_MS`]: crate::config::TELEMETRY_INTERVAL_MS
+    /// The robot's DHCP-assigned IP is embedded in the `robot_ip` field so
+    /// the host server can discover the robot without manual configuration.
     fn send(&mut self, frame: &TelemetryFrame) {
         if let Some(inner) = &mut self.inner {
             Self::send_telemetry(inner, frame);

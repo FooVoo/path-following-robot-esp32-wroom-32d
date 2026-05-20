@@ -53,18 +53,22 @@ telemetry channel.**
 proto/telemetry.proto
 
 message TelemetryFrame {
-  string robot_id        = 1;
-  sint32 lidar_left_cm   = 2;
-  sint32 lidar_right_cm  = 3;
-  sint32 throttle_left   = 4;
-  sint32 throttle_right  = 5;
+  string state           = 1;   // FSM state name: "IDLE", "RECORD", "READY", "PLAY", "AVOIDING", "HALT"
+  sint32 lidar_left_cm   = 2;   // -1 = stale / absent
+  sint32 lidar_right_cm  = 3;   // -1 = stale / absent
+  sint32 throttle_left   = 4;   // [-100, 100]
+  sint32 throttle_right  = 5;   // [-100, 100]
   uint64 uptime_ms       = 6;
-  string state           = 7;
+  string robot_ip        = 7;   // DHCP-assigned IPv4, e.g. "192.168.1.42" (injected by adapter)
 }
 ```
 
 `sint32` is used for signed sensor values (varint zig-zag encoding keeps
 small negative numbers compact).
+
+`robot_ip` carries the DHCP-assigned address so the fleet server can
+identify the sender without relying solely on the UDP source address (which
+may be unreliable behind NAT or in Docker bridge networks).  See ADR-003.
 
 ### Backwards compatibility shim
 

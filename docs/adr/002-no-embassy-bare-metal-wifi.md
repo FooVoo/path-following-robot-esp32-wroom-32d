@@ -47,20 +47,37 @@ using a synchronous `block_on` spin-loop for the one-time connect phase.**
 
 ### Implementation summary
 
+> **Note (2026-05-19):** `esp-wifi` was renamed to `esp-radio` in version 0.18.
+> The earlier draft that described `esp-wifi ~0.14` with `default-features = false`
+> to omit `builtin-scheduler` is superseded by the current crate split below.
+> The fundamental decision — no Embassy executor, bare-metal WiFi — is unchanged.
+
 ```toml
 # Cargo.toml
 [target.'cfg(target_arch = "xtensa")'.dependencies]
-esp-wifi  = { version = "~0.14", default-features = false,
-              features = ["esp32", "wifi", "smoltcp", "esp-alloc"] }
-esp-alloc = "0.8"
-smoltcp   = { version = "0.12", default-features = false,
-              features = ["proto-ipv4", "socket-udp", "medium-ethernet"] }
-static_cell = "2"
+esp-radio          = { version = "0.18", features = ["esp32", "wifi"] }
+esp-rtos           = { version = "0.3",  features = ["esp32", "esp-radio"] }
+embassy-net-driver = "0.2"          # token traits for smoltcp bridge
+esp-alloc          = "0.10"
+smoltcp            = { version = "0.12", default-features = false, features = [
+    "alloc", "proto-ipv4", "socket-udp", "socket-dhcpv4", "medium-ethernet"] }
 ```
 
-The critical point is `default-features = false` on `esp-wifi`.  This omits
-`builtin-scheduler`, which is the feature that required the unreleased
-`esp-hal/__esp_wifi_builtin_scheduler` symbol, breaking all builds.
+`esp-radio` (the renamed `esp-wifi`) no longer requires `default-features =
+false` to suppress the `builtin-scheduler` issue — the scheduler is now managed
+by the separate `esp-rtos` crate.  `embassy-net-driver = "0.2"` is still
+required for the `WifiRxToken` / `WifiTxToken` `consume_token` traits used in
+the smoltcp device bridge.
+
+**`esp-rtos` is required.**  WiFi ISR tasks run in the background only after
+`esp_rtos::start()` is called.  Call it before `WifiAdapter::connect()`:
+
+```rust
+// src/bin/main.rs — before WifiAdapter::connect()
+let timg1 = TimerGroup::new(peripherals.TIMG1);
+let sw_int = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
+esp_rtos::start(timg1.timer0, sw_int.software_interrupt0);
+```
 
 ### `block_on` — how it works
 
@@ -111,12 +128,13 @@ DMA receive buffers.  We allocate a **static 72 KB region** dedicated to WiFi:
 
 ```rust
 // src/bin/main.rs — module level (macro expands at compile time)
-esp_alloc::heap_allocator!(WIFI_HEAP_SIZE);  // WIFI_HEAP_SIZE = 72 * 1024
+esp_alloc::heap_allocator!(size: WIFI_HEAP_SIZE);  // WIFI_HEAP_SIZE = 72 * 1024
 ```
 
-The domain layer never allocates from this heap.  If the domain needs dynamic
-data structures in the future, a separate heap region should be carved out
-explicitly to prevent WiFi from evicting domain data.
+The `size:` keyword was introduced in `esp-alloc 0.10`; earlier versions used
+the positional form `heap_allocator!(WIFI_HEAP_SIZE)`.  The constant is defined
+in `src/config.rs` and shared between `main.rs` (which calls the macro) and any
+code that needs to know the heap budget.
 
 ### `W = NoWifi` — keeping tests green
 
