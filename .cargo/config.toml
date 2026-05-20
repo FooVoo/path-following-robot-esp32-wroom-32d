@@ -5,6 +5,16 @@ rustflags = [
   "-C", "link-arg=-nostartfiles",
 ]
 
+# ── ESP32-C3 / RISC-V target ─────────────────────────────────────────────────
+#
+# ESP32-C3 uses a standard RISC-V core (riscv32imc), so no Xtensa-specific
+# flags are needed.  riscv-rt (bundled with esp-hal) supplies the startup code
+# via the `#[entry]` / `#[main]` attribute, eliminating the need for
+# `-nostartfiles`.  The `linkall.x` linker script is injected by build.rs.
+[target.riscv32imc-unknown-none-elf]
+runner   = "espflash flash --monitor --chip esp32c3"
+rustflags = []
+
 [env]
 
 [build]
@@ -14,14 +24,62 @@ target = "xtensa-esp32-none-elf"
 build-std = ["core", "alloc"]
 
 # ── Aliases ──────────────────────────────────────────────────────────────────
-
+#
+# IMPORTANT — toolchain overrides (+esp / +stable) must be supplied by the
+# CALLER, not embedded in the alias value.  Cargo expands aliases before the
+# rustup shim can interpret a +toolchain prefix, so any +toolchain in an alias
+# value is seen by cargo as an unknown subcommand and fails with:
+#
+#   error: no such command: `+stable`
+#
+# Correct invocation pattern:
+#   cargo +stable test-host          ← rustup shim switches toolchain first
+#   cargo +esp    build-firmware     ← then cargo expands the alias
+#
+[alias]
+# ── Host targets — invoke as: cargo +stable <alias> ──────────────────────────
+#
 # Run unit tests on the host (Apple Silicon M-series) without ESP32 hardware.
 # Adapters are excluded from this build (gated on target_arch = "xtensa").
-#
-# Run via rustup so the +stable override is honoured:
-#   rustup run stable cargo test-host
-#
-# Or equivalently (when cargo is rustup's proxy shim):
 #   cargo +stable test-host
-[alias]
-test-host = "+stable test --lib --target aarch64-apple-darwin"
+test-host = "test --lib --target aarch64-apple-darwin"
+
+# Run unit tests (lib) and integration scenarios on the host.
+#   cargo +stable test-all-host
+test-all-host = "test --target aarch64-apple-darwin --lib --test fsm_scenarios"
+
+# Build the host-side telemetry server.
+# --target overrides the [build] target = "xtensa-esp32-none-elf" default so
+# the binary compiles for the host instead of the bare-metal ESP32 target.
+#   cargo +stable build-server            (macOS arm64)
+#   cargo +stable build-server-linux      (Linux x86_64)
+build-server       = "build --features host-server --bin telemetry-server --target aarch64-apple-darwin"
+build-server-linux = "build --features host-server --bin telemetry-server --target x86_64-unknown-linux-gnu"
+
+# ── ESP32 targets — invoke as: cargo +esp <alias> ────────────────────────────
+# PREREQUISITE: source ~/export-esp.sh  (adds xtensa-esp-elf-gcc to PATH)
+#
+# Build the production ESP32 firmware binary.
+#   cargo +esp build-firmware
+build-firmware = "build --features esp-firmware --bin path-following-robot"
+
+# Build the Wokwi simulation binary (esp toolchain, sim feature).
+#   cargo +esp build-sim
+build-sim = "build --features sim --bin path-following-robot-sim"
+
+# Build the local dev/debug binary (esp toolchain, dev feature).
+# Single VL53L0X, real LCD debug display, no WiFi, no mux.
+#   cargo +esp build-dev
+build-dev = "build --features dev --bin path-following-robot-dev"
+
+# ── ESP32-C3 targets — invoke as: cargo +esp <alias> ─────────────────────────
+# PREREQUISITE: source ~/export-esp.sh  (espup installs the RISC-V target too)
+# NOTE: --target must be explicit because [build].target defaults to Xtensa.
+#
+# Build the production ESP32-C3 firmware (WiFi, dual LIDAR via mux, no LCD).
+#   cargo +esp build-firmware-c3
+build-firmware-c3 = "build --features esp32c3-firmware --bin path-following-robot-c3 --target riscv32imc-unknown-none-elf"
+
+# Build the ESP32-C3 dev/debug binary (single LIDAR, no WiFi, no LCD).
+#   cargo +esp build-dev-c3
+build-dev-c3 = "build --features esp32c3-dev --bin path-following-robot-c3-dev --target riscv32imc-unknown-none-elf"

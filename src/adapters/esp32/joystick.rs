@@ -205,6 +205,13 @@ where
         self.btn_event = false;
         v
     }
+
+    fn is_button_held(&self) -> bool {
+        // `last_btn_level` is updated at the end of every `poll()` call to the
+        // current raw GPIO level, so after `poll()` it reliably reflects whether
+        // the button is physically held down right now.
+        self.last_btn_level
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -255,5 +262,30 @@ mod tests {
     fn mix_clamps_to_100() {
         let (l, _r) = mix_drive(100, 100);
         assert_eq!(l, 100);
+    }
+
+    /// A raw value just inside the dead-zone on the negative side must map to 0.
+    #[test]
+    fn map_axis_negative_dead_zone_gives_zero() {
+        use crate::config::{DEAD_ZONE_RAW, JOY_CENTER_RAW};
+        // One step inside the dead-zone toward the low end.
+        let in_dead_zone = JOY_CENTER_RAW - DEAD_ZONE_RAW + 1;
+        assert_eq!(map_axis(in_dead_zone), 0, "value inside dead-zone must give 0");
+    }
+
+    /// Full reverse straight: y = -100, x = 0 → both motors at -100.
+    #[test]
+    fn mix_full_reverse_straight() {
+        let (l, r) = mix_drive(0, -100);
+        assert_eq!(l, -100);
+        assert_eq!(r, -100);
+    }
+
+    /// Left turn: x = -64, y = 0 → left motor negative, right motor positive.
+    #[test]
+    fn mix_turn_left() {
+        let (l, r) = mix_drive(-64, 0);
+        assert_eq!(l, -64, "left motor should be negative for left turn");
+        assert_eq!(r, 64, "right motor should be positive for left turn");
     }
 }

@@ -1,6 +1,6 @@
 //! Pure-domain robot aggregate.
 //!
-//! `Robot<M, L, I, W>` implements the six-state FSM without any direct
+//! `Robot<M, L, I, W>` implements the seven-state FSM without any direct
 //! dependency on `esp_hal`.  All timing uses `now_ms: u64` (milliseconds
 //! since boot) passed in by the caller.  Hardware access is mediated
 //! exclusively through the four port traits:
@@ -16,16 +16,19 @@
 //! # State machine
 //!
 //! ```text
-//!  ┌──────┐  button  ┌────────┐  button  ┌───────┐  button  ┌──────┐
-//!  │ IDLE │ ───────► │ RECORD │ ───────► │ READY │ ───────► │ PLAY │
-//!  └──────┘          └────────┘          └───────┘          └──┬───┘
-//!                      buffer                                   │obstacle
-//!                      full                                     ▼
-//!                        │                               ┌──────────┐
-//!                        ▼                               │ AVOIDING │
-//!                    ┌──────┐                            └──────────┘
-//!                    │ HALT │◄── path done ──────────────────────────
-//!                    └──────┘
+//!  ┌────────┐  short press  ┌────────┐  button  ┌───────┐  button  ┌──────┐
+//!  │  IDLE  │ ────────────► │ RECORD │ ───────► │ READY │ ───────► │ PLAY │
+//!  │        │               └────────┘          └───────┘          └──┬───┘
+//!  │        │  long press   ┌────────┐                     obstacle    │
+//!  │        │ ────────────► │ DIRECT │                               ▼
+//!  └────────┘◄── button ─── └────────┘                       ┌──────────┐
+//!                                                             │ AVOIDING │
+//!                buffer full / path done                      └──────────┘
+//!                      │                                           │
+//!                      ▼        path done / avoidance timeout      │
+//!                  ┌──────┐ ◄───────────────────────────────────────
+//!                  │ HALT │
+//!                  └──────┘
 //! ```
 
 use log::{debug, error, info, trace, warn};
@@ -33,13 +36,14 @@ use log::{debug, error, info, trace, warn};
 use crate::{
     config::{
         AVOID_BACK_MS, AVOID_TIMEOUT_MS, AVOID_TURN_MS, CLEAR_CM, HALT_LOG_INTERVAL_MS,
-        OBSTACLE_CM, PATH_CMD_INTERVAL_MS, TELEMETRY_INTERVAL_MS, WARN_CM,
+        LONG_PRESS_MS, OBSTACLE_CM, PATH_CMD_INTERVAL_MS, TELEMETRY_INTERVAL_MS, WARN_CM,
     },
     domain::{
         path::{PathBuffer, PathCommand},
         state::{ObstacleSide, RobotState},
     },
     ports::{
+        display::DisplayPort,
         distance::DistancePort,
         input::InputPort,
         motors::MotorPort,
@@ -68,17 +72,32 @@ impl TelemetryPort for NoWifi {
     fn send(&mut self, _frame: &TelemetryFrame) {}
 }
 
+// ── No-op Display implementation ──────────────────────────────────────────────
+
+/// No-op display port — used as the default `D` type when no LCD is connected.
+///
+/// Both [`DisplayPort`] methods are silent no-ops so that `Robot::new()` and
+/// `Robot::new_with_wifi()` compile without any display dependency.
+pub struct NoDisplay;
+
+impl DisplayPort for NoDisplay {
+    fn print_row(&mut self, _row: u8, _text: &str) {}
+    fn clear(&mut self) {}
+}
+
 // ── Robot aggregate ───────────────────────────────────────────────────────────
 
 /// The robot aggregate — owns ports and state machine data.
 ///
 /// Generic parameters:
 /// * `M` — motor port (DRV8833 adapter)
-/// * `L` — distance port (TF-Luna adapter; same type for both sensors)
+/// * `L` — distance port (TF-Luna / VL53L0X adapter; same type for both sensors)
 /// * `I` — input port  (joystick adapter)
 /// * `W` — WiFi port implementing both [`RemoteControlPort`] and
 ///          [`TelemetryPort`]; defaults to [`NoWifi`] (silent no-ops).
-pub struct Robot<M, L, I, W = NoWifi> {
+/// * `D` — display port implementing [`DisplayPort`]; defaults to [`NoDisplay`]
+///          (silent no-ops).
+pub struct Robot<M, L, I, W = NoWifi, D = NoDisplay> {
     motors: M,
     lidar_l: L,
     lidar_r: L,
@@ -86,6 +105,9 @@ pub struct Robot<M, L, I, W = NoWifi> {
     /// Remote WiFi port — polled once per tick for incoming commands and
     /// used to emit telemetry at `TELEMETRY_INTERVAL_MS` intervals.
     wifi: W,
+    /// Character display — updated on state change (row 0) and at the
+    /// telemetry cadence (row 1, lidar readings).
+    display: D,
 
     state: RobotState,
     path: PathBuffer,
@@ -108,39 +130,70 @@ pub struct Robot<M, L, I, W = NoWifi> {
     last_tr: i8,
     /// `now_ms` when the last telemetry frame was emitted.
     last_telemetry_ms: u64,
+    /// State displayed on row 0 at the last display update; prevents redundant writes.
+    last_display_state: RobotState,
+    /// `now_ms` when the physical button was first detected as held in IDLE.
+    ///
+    /// `None` when the button is not pressed.  Used to distinguish a long press
+    /// (≥ `LONG_PRESS_MS` → DIRECT) from a short press (< `LONG_PRESS_MS` → RECORD).
+    button_hold_start: Option<u64>,
 }
 
 // ── Constructors ──────────────────────────────────────────────────────────────
 
-impl<M, L, I> Robot<M, L, I, NoWifi>
+impl<M, L, I> Robot<M, L, I, NoWifi, NoDisplay>
 where
     M: MotorPort,
     L: DistancePort,
     I: InputPort,
 {
-    /// Construct the robot with WiFi disabled (telemetry and remote control
-    /// are no-ops).
+    /// Construct the robot with WiFi and display both disabled (all no-ops).
     ///
-    /// This is the standard constructor used in tests and when no WiFi adapter
-    /// is wired up.
+    /// This is the standard constructor used in tests and when neither a WiFi
+    /// adapter nor an LCD is wired up.
     pub fn new(motors: M, lidar_l: L, lidar_r: L, input: I) -> Self {
-        Robot::new_with_wifi(motors, lidar_l, lidar_r, input, NoWifi)
+        Robot::new_full(motors, lidar_l, lidar_r, input, NoWifi, NoDisplay)
     }
 }
 
-impl<M, L, I, W> Robot<M, L, I, W>
+impl<M, L, I, W> Robot<M, L, I, W, NoDisplay>
 where
     M: MotorPort,
     L: DistancePort,
     I: InputPort,
     W: RemoteControlPort + TelemetryPort,
 {
-    /// Construct the robot with a WiFi adapter for telemetry and remote
-    /// control.
+    /// Construct the robot with a WiFi adapter but no display.
     ///
     /// `wifi` must implement both [`RemoteControlPort`] (receives commands) and
     /// [`TelemetryPort`] (sends state snapshots).
     pub fn new_with_wifi(motors: M, lidar_l: L, lidar_r: L, input: I, wifi: W) -> Self {
+        Robot::new_full(motors, lidar_l, lidar_r, input, wifi, NoDisplay)
+    }
+}
+
+impl<M, L, I, W, D> Robot<M, L, I, W, D>
+where
+    M: MotorPort,
+    L: DistancePort,
+    I: InputPort,
+    W: RemoteControlPort + TelemetryPort,
+    D: DisplayPort,
+{
+    /// Construct the robot with all five ports explicitly specified.
+    ///
+    /// This is the full constructor used by `main.rs` when an LCD is attached.
+    /// The two convenience constructors ([`Robot::new`] and
+    /// [`Robot::new_with_wifi`]) delegate here with [`NoDisplay`] / [`NoWifi`]
+    /// defaults respectively.
+    pub fn new_full(
+        motors:  M,
+        lidar_l: L,
+        lidar_r: L,
+        input:   I,
+        wifi:    W,
+        display: D,
+    ) -> Self {
         info!("Robot initialised → Idle");
         Self {
             motors,
@@ -148,6 +201,7 @@ where
             lidar_r,
             input,
             wifi,
+            display,
             state: RobotState::Idle,
             path: PathBuffer::new(),
             record_start_ms: 0,
@@ -159,6 +213,8 @@ where
             last_tl: 0,
             last_tr: 0,
             last_telemetry_ms: 0,
+            last_display_state: RobotState::Idle,
+            button_hold_start: None,
         }
     }
 
@@ -189,9 +245,16 @@ where
             RobotState::Play     => self.tick_play(now_ms),
             RobotState::Avoiding => self.tick_avoiding(now_ms),
             RobotState::Halt     => self.tick_halt(now_ms),
+            RobotState::Direct   => self.tick_direct(now_ms),
         }
 
-        // 4. Emit telemetry at the configured interval.
+        // 4. Update LCD row 0 when the state changes.
+        if self.state != self.last_display_state {
+            self.display.print_row(0, self.state.name());
+            self.last_display_state = self.state;
+        }
+
+        // 5. Emit telemetry and update LCD row 1 at the configured interval.
         if now_ms.saturating_sub(self.last_telemetry_ms) >= TELEMETRY_INTERVAL_MS {
             let frame = TelemetryFrame {
                 state_name: self.state.name(),
@@ -203,7 +266,35 @@ where
             };
             self.wifi.send(&frame);
             self.last_telemetry_ms = now_ms;
+
+            // Row 1: in DIRECT mode show live throttle so the operator can
+            // see what the joystick is commanding; otherwise show LIDAR
+            // readings in a fixed-width format "Lxxx Rxxx cm".
+            // Uses heapless::String so no heap allocation is required.
+            use core::fmt::Write as _;
+            let mut row1: heapless::String<16> = heapless::String::new();
+            if self.state == RobotState::Direct {
+                // {:+4} always occupies exactly 4 chars (sign + up to 3 digits
+                // for i8 range −100…+100), giving "L{4} R{4}     " = 16 chars.
+                let _ = write!(row1, "L{:+4} R{:+4}     ", self.last_tl, self.last_tr);
+            } else {
+                match (frame.lidar_l_cm, frame.lidar_r_cm) {
+                    (Some(l), Some(r)) => { let _ = write!(row1, "L{:>3} R{:>3} cm", l, r); }
+                    (Some(l), None)    => { let _ = write!(row1, "L{:>3} R--- cm", l); }
+                    (None,    Some(r)) => { let _ = write!(row1, "L--- R{:>3} cm", r); }
+                    (None,    None)    => { let _ = write!(row1, "L--- R--- cm   "); }
+                }
+            }
+            self.display.print_row(1, row1.as_str());
         }
+    }
+
+    /// Return the current FSM state.
+    ///
+    /// Primarily useful for integration tests and telemetry dashboards;
+    /// production code should not branch on state externally.
+    pub fn state(&self) -> RobotState {
+        self.state
     }
 
     // -----------------------------------------------------------------------
@@ -212,11 +303,43 @@ where
 
     fn tick_idle(&mut self, now_ms: u64) {
         trace!("IDLE");
-        if self.input.take_button_press() || self.wifi.poll_button() {
-            info!("IDLE → RECORD");
+
+        // WiFi button: immediate RECORD (remote control — no long-press UX needed).
+        if self.wifi.poll_button() {
+            info!("IDLE → RECORD (WiFi)");
             self.path.clear();
             self.record_start_ms = now_ms;
+            self.button_hold_start = None;
             self.state = RobotState::Record;
+            return;
+        }
+
+        // Physical button: record the moment the press edge arrives.
+        // A second press while a hold is already in progress is silently
+        // dropped (debounce makes this unlikely in practice).
+        if self.input.take_button_press() {
+            if self.button_hold_start.is_none() {
+                self.button_hold_start = Some(now_ms);
+            } else {
+                trace!("button press ignored — hold already in progress");
+            }
+        }
+
+        // Decide on button release: long press → DIRECT, short press → RECORD.
+        if let Some(hold_start) = self.button_hold_start {
+            if !self.input.is_button_held() {
+                let held_ms = now_ms.saturating_sub(hold_start);
+                self.button_hold_start = None;
+                if held_ms >= LONG_PRESS_MS {
+                    info!("IDLE → DIRECT (long press {}ms)", held_ms);
+                    self.state = RobotState::Direct;
+                } else {
+                    info!("IDLE → RECORD (short press {}ms)", held_ms);
+                    self.path.clear();
+                    self.record_start_ms = now_ms;
+                    self.state = RobotState::Record;
+                }
+            }
         }
     }
 
@@ -238,7 +361,7 @@ where
 
         // Sample at PATH_CMD_INTERVAL_MS resolution.
         if now_ms.saturating_sub(self.record_start_ms) >= PATH_CMD_INTERVAL_MS {
-            let elapsed = (now_ms - self.record_start_ms) as u16;
+            let elapsed = (now_ms - self.record_start_ms).min(u16::MAX as u64) as u16;
             let cmd = PathCommand {
                 throttle_l: tl,
                 throttle_r: tr,
@@ -286,8 +409,14 @@ where
         let dr = self.lidar_r.distance_cm();
         Self::log_proximity(dl, dr);
 
-        // Obstacle detection — treat a stale/missing reading as NOT clear so
-        // we fail safe and go to avoiding if we lose sensor contact.
+        // Obstacle detection: `map_or(false, …)` intentionally treats a
+        // stale / None reading as "not blocked" — a missing sensor does NOT
+        // trigger avoidance.  Rationale: a disconnected sensor would cause
+        // perpetual AVOIDING; the risk of a brief stale window going
+        // undetected is lower than the risk of a phantom avoidance loop.
+        // (The inverse policy — stale = blocked — applies in Phase 3 of
+        // tick_avoiding, where the robot waits until both sensors explicitly
+        // confirm the path is clear before resuming.)
         let l_blocked = dl.map_or(false, |d| d < OBSTACLE_CM);
         let r_blocked = dr.map_or(false, |d| d < OBSTACLE_CM);
 
@@ -365,7 +494,11 @@ where
             return;
         }
 
-        // Phase 3 — check if path is now clear.
+        // Phase 3 — stop motors, then check if path is clear.
+        // DRV8833 is set-and-forget: without an explicit coast here the motors
+        // continue at Phase 2's last duty cycle indefinitely.
+        self.do_coast();
+
         let dl = self.lidar_l.distance_cm();
         let dr = self.lidar_r.distance_cm();
         let l_clear = dl.map_or(false, |d| d >= CLEAR_CM);
@@ -414,6 +547,23 @@ where
             self.halt_log_ms = Some(now_ms);
         }
         self.do_coast();
+    }
+
+    fn tick_direct(&mut self, _now_ms: u64) {
+        // Any button press (short or long) exits back to IDLE and coasts motors.
+        // Note: the WiFi button has no effect in DIRECT mode by design.
+        if self.input.take_button_press() {
+            info!("DIRECT → IDLE");
+            self.do_coast();
+            self.state = RobotState::Idle;
+            return;
+        }
+
+        // Pass joystick throttle directly to the motors — no LIDAR, no path logic.
+        let tl = self.input.throttle_left();
+        let tr = self.input.throttle_right();
+        trace!("DIRECT L={:+} R={:+}", tl, tr);
+        self.do_drive(tl, tr);
     }
 
     // -----------------------------------------------------------------------
@@ -465,7 +615,7 @@ where
 mod tests {
     use super::*;
     use crate::config::{
-        AVOID_BACK_MS, AVOID_TIMEOUT_MS, AVOID_TURN_MS, CLEAR_CM, OBSTACLE_CM,
+        AVOID_BACK_MS, AVOID_TIMEOUT_MS, AVOID_TURN_MS, CLEAR_CM, LONG_PRESS_MS, OBSTACLE_CM,
         PATH_CMD_INTERVAL_MS, TELEMETRY_INTERVAL_MS,
     };
 
@@ -526,6 +676,13 @@ mod tests {
     #[derive(Default)]
     struct MockInput {
         pending_presses: usize,
+        /// Simulates the raw "is button physically held down" GPIO level.
+        ///
+        /// Defaults to `false` (not held), which makes existing tests that call
+        /// `press()` behave as an instantaneous click: `take_button_press()` fires
+        /// once and `is_button_held()` immediately returns `false`, so `tick_idle`
+        /// transitions to RECORD in the same tick (held_ms = 0 < LONG_PRESS_MS).
+        btn_held: bool,
         tl: i8,
         tr: i8,
     }
@@ -537,6 +694,15 @@ mod tests {
         }
         fn press(&mut self) {
             self.press_n(1);
+        }
+        /// Simulate the button being pressed AND held (sets held state + queues edge).
+        fn press_and_hold(&mut self) {
+            self.pending_presses += 1;
+            self.btn_held = true;
+        }
+        /// Simulate the button being released.
+        fn release(&mut self) {
+            self.btn_held = false;
         }
         fn set_throttle(&mut self, left: i8, right: i8) {
             self.tl = left;
@@ -559,6 +725,9 @@ mod tests {
             } else {
                 false
             }
+        }
+        fn is_button_held(&self) -> bool {
+            self.btn_held
         }
     }
 
@@ -597,6 +766,45 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
+
+    /// No-op display for unit tests — silently discards all writes.
+    #[derive(Default)]
+    struct MockDisplay;
+
+    impl DisplayPort for MockDisplay {
+        fn print_row(&mut self, _row: u8, _text: &str) {}
+        fn clear(&mut self) {}
+    }
+
+    /// Recording display — captures every `print_row` call so tests can
+    /// assert exactly what was written to each LCD row.
+    #[derive(Default)]
+    struct RecordingDisplay {
+        row0: Vec<String>,
+        row1: Vec<String>,
+    }
+
+    impl RecordingDisplay {
+        fn last_row1(&self) -> &str {
+            self.row1.last().map(String::as_str).unwrap_or("")
+        }
+    }
+
+    impl DisplayPort for RecordingDisplay {
+        fn print_row(&mut self, row: u8, text: &str) {
+            match row {
+                0 => self.row0.push(text.to_string()),
+                1 => self.row1.push(text.to_string()),
+                _ => {}
+            }
+        }
+        fn clear(&mut self) {
+            self.row0.clear();
+            self.row1.clear();
+        }
+    }
+
+    // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
 
@@ -625,6 +833,18 @@ mod tests {
             MockDistance::default(),
             MockInput::default(),
             MockWifi::default(),
+        )
+    }
+
+    /// Construct a fresh Robot with a `RecordingDisplay` attached.
+    fn make_robot_with_display() -> Robot<MockMotors, MockDistance, MockInput, NoWifi, RecordingDisplay> {
+        Robot::new_full(
+            MockMotors::default(),
+            MockDistance::default(),
+            MockDistance::default(),
+            MockInput::default(),
+            NoWifi,
+            RecordingDisplay::default(),
         )
     }
 
@@ -1448,6 +1668,36 @@ mod tests {
         assert_eq!(r.avoid_side, None, "avoid_side must be reset to None on AVOIDING → PLAY");
     }
 
+    #[test]
+    /// During Phase 3 (post-turn, sensors not yet clear) the motors must be
+    /// coasted every tick.  Without this guardrail the DRV8833 would keep
+    /// spinning at the last Phase-2 duty cycle indefinitely.
+    fn avoiding_phase3_coasts_motors_while_waiting() {
+        let mut r = robot_in_avoiding();
+        // Advance to Phase 3 — leave sensors blocked (default is OBSTACLE_CM - 1).
+        let phase3_start = r.avoid_start_ms + AVOID_BACK_MS + AVOID_TURN_MS + 1;
+        let drives_before = r.motors.drives.len();
+        let coasts_before = r.motors.coasts;
+        r.tick(phase3_start);
+        assert_eq!(r.state, RobotState::Avoiding, "should still be avoiding");
+        assert_eq!(
+            r.motors.drives.len(),
+            drives_before,
+            "no new drive commands must be issued in Phase 3"
+        );
+        assert!(
+            r.motors.coasts > coasts_before,
+            "motors must be coasted on Phase 3 entry"
+        );
+        // A second Phase-3 tick must also coast (not drive).
+        let coasts_after_first = r.motors.coasts;
+        r.tick(phase3_start + 1);
+        assert!(
+            r.motors.coasts > coasts_after_first,
+            "motors must stay coasted on subsequent Phase 3 ticks"
+        );
+    }
+
     // -------------------------------------------------------------------------
     // HALT — additional coverage
     // -------------------------------------------------------------------------
@@ -1575,6 +1825,294 @@ mod tests {
         assert_eq!(RobotState::Play.name(),     "PLAY");
         assert_eq!(RobotState::Avoiding.name(), "AVOIDING");
         assert_eq!(RobotState::Halt.name(),     "HALT");
+        assert_eq!(RobotState::Direct.name(),   "DIRECT");
+    }
+
+    // -------------------------------------------------------------------------
+    // DIRECT state tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn direct_entered_from_idle_on_long_press() {
+        let mut r = make_robot();
+
+        // Simulate a long button press: press + hold.
+        r.input.press_and_hold();
+        r.tick(0); // press edge detected → hold_start = 0; still held → no transition yet
+
+        // Keep ticking with button held — must not transition prematurely.
+        for t in 1..LONG_PRESS_MS {
+            r.tick(t);
+            assert_eq!(r.state, RobotState::Idle, "must stay Idle while button is held (t={})", t);
+        }
+
+        // Release button after LONG_PRESS_MS has elapsed.
+        r.input.release();
+        r.tick(LONG_PRESS_MS);
+        assert_eq!(r.state, RobotState::Direct, "long press must transition Idle → Direct");
+    }
+
+    #[test]
+    fn direct_short_press_does_not_enter_direct() {
+        // A press shorter than LONG_PRESS_MS must go to RECORD, not DIRECT.
+        let mut r = make_robot();
+        r.input.press(); // btn_held defaults to false → instant release
+        r.tick(0);
+        assert_eq!(
+            r.state,
+            RobotState::Record,
+            "short press (btn_held=false) must enter RECORD, not DIRECT"
+        );
+    }
+
+    #[test]
+    fn direct_joystick_drives_motors() {
+        // Build a robot already in Direct state.
+        let mut r = make_robot();
+        r.input.press_and_hold();
+        r.tick(0);
+        for t in 1..LONG_PRESS_MS {
+            r.tick(t);
+        }
+        r.input.release();
+        r.tick(LONG_PRESS_MS);
+        assert_eq!(r.state, RobotState::Direct);
+
+        // In Direct state, joystick throttle must be passed straight to motors.
+        r.input.set_throttle(60, -40);
+        r.tick(LONG_PRESS_MS + 1);
+        assert_eq!(
+            r.motors.last_drive(),
+            Some((60, -40)),
+            "Direct must apply joystick throttle directly to motors every tick"
+        );
+    }
+
+    #[test]
+    fn direct_button_press_exits_to_idle() {
+        // Build a robot in Direct state.
+        let mut r = make_robot();
+        r.input.press_and_hold();
+        r.tick(0);
+        for t in 1..LONG_PRESS_MS {
+            r.tick(t);
+        }
+        r.input.release();
+        r.tick(LONG_PRESS_MS);
+        assert_eq!(r.state, RobotState::Direct);
+
+        // Any button press in Direct must exit to Idle and coast.
+        let t_exit = LONG_PRESS_MS + 2;
+        let coasts_before = r.motors.coasts;
+        r.input.press();
+        r.tick(t_exit);
+        assert_eq!(r.state, RobotState::Idle, "button press in Direct must transition to Idle");
+        assert!(
+            r.motors.coasts > coasts_before,
+            "exiting Direct must call coast() to stop motors"
+        );
+    }
+
+    /// A hold released at exactly LONG_PRESS_MS - 1 ms must go to RECORD, not DIRECT.
+    #[test]
+    fn direct_long_press_one_ms_short_goes_to_record() {
+        let mut r = make_robot();
+        r.input.press_and_hold(); // edge + held
+        r.tick(0); // hold_start = 0; still held → stay Idle
+
+        // Keep button held through tick LONG_PRESS_MS - 2 (held_ms still < threshold).
+        for t in 1..LONG_PRESS_MS - 1 {
+            r.tick(t);
+            assert_eq!(r.state, RobotState::Idle, "must stay Idle while button held (t={})", t);
+        }
+
+        // Release one tick before threshold — held_ms = (LONG_PRESS_MS-1) - 0 = LONG_PRESS_MS-1.
+        r.input.release();
+        r.tick(LONG_PRESS_MS - 1);
+        assert_eq!(
+            r.state,
+            RobotState::Record,
+            "hold of LONG_PRESS_MS-1 ms must go to RECORD, not DIRECT"
+        );
+    }
+
+    /// The WiFi button must have no effect while in DIRECT mode.
+    #[test]
+    fn direct_wifi_button_ignored() {
+        // Build a robot with WiFi, then enter DIRECT via long press.
+        let mut r = make_robot_with_wifi();
+        r.input.press_and_hold();
+        r.tick(0);
+        for t in 1..LONG_PRESS_MS {
+            r.tick(t);
+        }
+        r.input.release();
+        r.tick(LONG_PRESS_MS);
+        assert_eq!(r.state, RobotState::Direct);
+
+        // Fire WiFi button — tick_direct does NOT check wifi.poll_button().
+        r.wifi.button_presses = 1;
+        r.tick(LONG_PRESS_MS + 1);
+        assert_eq!(
+            r.state,
+            RobotState::Direct,
+            "WiFi button must be ignored in DIRECT state"
+        );
+    }
+
+    /// Each tick in DIRECT applies the current joystick throttle to the motors.
+    #[test]
+    fn direct_throttle_changes_applied_per_tick() {
+        let mut r = make_robot();
+        r.input.press_and_hold();
+        r.tick(0);
+        for t in 1..LONG_PRESS_MS {
+            r.tick(t);
+        }
+        r.input.release();
+        r.tick(LONG_PRESS_MS);
+        assert_eq!(r.state, RobotState::Direct);
+
+        // First throttle setting.
+        r.input.set_throttle(30, -30);
+        r.tick(LONG_PRESS_MS + 1);
+        assert_eq!(r.motors.last_drive(), Some((30, -30)));
+
+        // Change throttle — must be reflected in the very next tick.
+        r.input.set_throttle(70, 20);
+        r.tick(LONG_PRESS_MS + 2);
+        assert_eq!(
+            r.motors.last_drive(),
+            Some((70, 20)),
+            "updated throttle must be applied to motors on the very next tick"
+        );
+    }
+
+    /// In DIRECT mode the LCD row 1 must show live throttle values, not LIDAR
+    /// readings.  In all other states it must continue to show LIDAR.
+    #[test]
+    fn direct_lcd_row1_shows_throttle_not_lidar() {
+        let mut r = make_robot_with_display();
+
+        // Enter DIRECT via long press.
+        r.input.press_and_hold();
+        r.tick(0);
+        for t in 1..LONG_PRESS_MS {
+            r.tick(t);
+        }
+        r.input.release();
+        r.tick(LONG_PRESS_MS);
+        assert_eq!(r.state, RobotState::Direct);
+
+        // Set a known throttle then advance past the telemetry interval so the
+        // display block fires.
+        r.input.set_throttle(75, -50);
+        let t_tel = LONG_PRESS_MS + TELEMETRY_INTERVAL_MS + 1;
+        r.tick(t_tel);
+
+        let row1 = r.display.last_row1().to_string();
+        assert!(
+            row1.contains("+75") && row1.contains("-50"),
+            "DIRECT row 1 must show throttle values, got: {:?}",
+            row1
+        );
+        assert!(
+            !row1.contains("cm"),
+            "DIRECT row 1 must not show LIDAR 'cm' suffix, got: {:?}",
+            row1
+        );
+    }
+
+    /// Outside DIRECT mode the LCD row 1 must show LIDAR readings, not throttle.
+    #[test]
+    fn non_direct_lcd_row1_shows_lidar_not_throttle() {
+        let mut r = make_robot_with_display();
+
+        // Remain in Idle and advance past the telemetry interval.
+        r.tick(TELEMETRY_INTERVAL_MS + 1);
+
+        let row1 = r.display.last_row1().to_string();
+        assert!(
+            row1.contains("cm") || row1.contains("---"),
+            "Non-DIRECT row 1 must show LIDAR format, got: {:?}",
+            row1
+        );
+        // "---" itself contains '-', so only check that no '+' sign appears
+        // (throttle values always carry an explicit '+' for positive readings).
+        assert!(
+            !row1.contains('+'),
+            "Non-DIRECT row 1 must not show signed throttle values, got: {:?}",
+            row1
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // IDLE — second-press drop
+    // -------------------------------------------------------------------------
+
+    /// A second button press while a hold is already in progress must be silently
+    /// dropped (debounce guardrail).  The existing hold_start must be preserved.
+    #[test]
+    fn idle_second_press_while_hold_in_progress_is_dropped() {
+        let mut r = make_robot();
+
+        // First press + hold: sets hold_start without releasing.
+        r.input.press_and_hold();
+        r.tick(0);
+        assert_eq!(r.state, RobotState::Idle, "button still held → stay Idle");
+        assert!(
+            r.button_hold_start.is_some(),
+            "hold_start must be set after first press"
+        );
+
+        // Enqueue a second press while the hold is still active.
+        r.input.press();
+        r.tick(1);
+        // The second press edge should be consumed but silently dropped.
+        assert_eq!(r.state, RobotState::Idle, "still Idle with hold in progress");
+        assert!(
+            r.button_hold_start.is_some(),
+            "hold_start must survive the dropped second press"
+        );
+        // pending_presses must now be empty (the edge was consumed, not re-queued).
+        assert_eq!(
+            r.input.pending_presses,
+            0,
+            "dropped press must have been consumed, not re-queued"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // AVOIDING Phase 3 — stale sensor stays in Avoiding
+    // -------------------------------------------------------------------------
+
+    /// None sensor readings in Phase 3 must keep the robot in Avoiding (fail-safe:
+    /// a stale/missing sensor must not be treated as "path clear").
+    #[test]
+    fn avoiding_phase3_stale_sensor_stays_in_avoiding() {
+        let mut r = robot_in_avoiding();
+
+        // Advance into Phase 3.
+        let phase3_start = r.avoid_start_ms + AVOID_BACK_MS + AVOID_TURN_MS + 1;
+
+        // Clear both sensors to None (stale / sensor error).
+        r.lidar_l.clear();
+        r.lidar_r.clear();
+
+        r.tick(phase3_start);
+        assert_eq!(
+            r.state,
+            RobotState::Avoiding,
+            "None sensor in Phase 3 must NOT be treated as 'clear'"
+        );
+
+        // A second tick must still stay in Avoiding (not resume Play).
+        r.tick(phase3_start + 1);
+        assert_eq!(
+            r.state,
+            RobotState::Avoiding,
+            "Avoiding must persist with stale sensors"
+        );
     }
 }
 

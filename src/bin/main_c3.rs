@@ -1,41 +1,58 @@
-//! ESP32 path-following robot – composition root.
+//! ESP32-C3 path-following robot — production firmware composition root.
 //!
-//! This file is intentionally thin.  Its only jobs are:
+//! This file mirrors `main.rs` (ESP32 / Xtensa) but targets the
+//! **ESP32-C3-MINI-1** (RISC-V, `riscv32imc-unknown-none-elf`).
 //!
-//! 1. Initialise all ESP32 peripherals.
-//! 2. Construct the hardware adapters:
-//!    - `Drv8833` (DRV8833 H-bridge motor driver)
-//!    - `Tca9548a` (TCA9548A / PCA9548A 8-channel I2C mux)
-//!    - `Vl53l0xOnMux` × 2 (VL53L0X ToF LIDAR, left and right via mux)
-//!    - `Lcd1602` (HD44780 1602 LCD, 4-bit parallel)
-//!    - `Uln2003` (ULN2003 stepper driver for 28BYJ-48)
-//!    - `Esp32Joystick` (ADC joystick + push-button)
-//!    - `WifiAdapter` (telemetry + remote control)
-//! 3. Wire them into `Robot` and call `robot.tick(now_ms)` at ~100 Hz.
+//! Key differences from the ESP32 binary:
 //!
-//! All business logic lives in [`path_following_robot::domain::robot`].
-//! All hardware-specific code lives in [`path_following_robot::adapters::esp32`].
+//! * **No display** — the ESP32-C3-MINI-1 module only exposes GPIO0–GPIO10 and
+//!   GPIO18–GPIO21 for user I/O.  GPIO11–GPIO17 are wired to internal SPI flash.
+//!   Fitting a 6-pin HD44780 would require sacrificing UART0 debug output.
+//!   The SSD1306 OLED is available in the dev binary (`main_c3_dev.rs`);
+//!   the production firmware uses [`NoDisplay`] to keep binary size minimal.
+//! * **All adapters re-used unchanged** — esp-hal exposes the same LEDC, ADC,
+//!   I2C, and WiFi APIs on both chips.
+//! * **`Robot::new_with_wifi`** is used instead of `Robot::new_full` because
+//!   there is no display in the production build.
 //!
-//! # Pin assignment (ESP32-WROOM-32D)
+//! # Building
 //!
-//! | Signal       | GPIO | Notes                                              |
-//! |--------------|------|----------------------------------------------------|
-//! | AIN1         |  25  | Left motor forward                                 |
-//! | AIN2         |  26  | Left motor reverse                                 |
-//! | BIN1         |  32  | Right motor forward                                |
-//! | BIN2         |  33  | Right motor reverse                                |
-//! | I2C SDA      |  21  | Shared by TCA9548A + VL53L0X                       |
-//! | I2C SCL      |  22  | Shared by TCA9548A + VL53L0X                       |
-//! | LCD RS       |   5  | HD44780 register select                            |
-//! | LCD EN       |   4  | HD44780 enable clock                               |
-//! | LCD D4–D7    | 13,14,15,2 | HD44780 data bits (4-bit mode)            |
-//! | STEPPER IN1  |  18  | ULN2003 coil A                                     |
-//! | STEPPER IN2  |  19  | ULN2003 coil B                                     |
-//! | STEPPER IN3  |  23  | ULN2003 coil C                                     |
-//! | STEPPER IN4  |  12  | ULN2003 coil D                                     |
-//! | JOY X        |  36  | ADC1 ch0 (VP), input-only, no pull                 |
-//! | JOY Y        |  39  | ADC1 ch3 (VN), input-only, no pull                 |
-//! | JOY BTN      |  27  | Active-low, internal pull-up                       |
+//! ```sh
+//! cargo +esp build --features esp32c3-firmware --bin path-following-robot-c3 \
+//!       --target riscv32imc-unknown-none-elf
+//! # or via alias:
+//! cargo build-firmware-c3
+//! ```
+//!
+//! # Flashing
+//!
+//! ```sh
+//! cargo +esp run --features esp32c3-firmware --bin path-following-robot-c3 \
+//!       --target riscv32imc-unknown-none-elf
+//! # or directly:
+//! espflash flash --monitor --chip esp32c3 \
+//!       target/riscv32imc-unknown-none-elf/debug/path-following-robot-c3
+//! ```
+//!
+//! # Pin assignment (ESP32-C3-MINI-1)
+//!
+//! | Signal       | GPIO | Notes                                                       |
+//! |--------------|------|-------------------------------------------------------------|
+//! | AIN1         |   3  | Left motor forward  (LEDC CH0)                             |
+//! | AIN2         |   4  | Left motor reverse  (LEDC CH1)                             |
+//! | BIN1         |   5  | Right motor forward (LEDC CH2)                             |
+//! | BIN2         |   6  | Right motor reverse (LEDC CH3)                             |
+//! | I2C SDA      |   7  | Shared by TCA9548A + VL53L0X                                |
+//! | I2C SCL      |   8  | ⚠ strapping pin — I2C pull-up holds it high at boot        |
+//! | STEPPER IN1  |   2  | ⚠ strapping pin (JTAG) — fit 10 kΩ pull-up to 3.3 V       |
+//! | STEPPER IN2  |   9  | ⚠ strapping pin (BOOT) — internal pull-up, safe at boot    |
+//! | STEPPER IN3  |  18  |                                                             |
+//! | STEPPER IN4  |  19  |                                                             |
+//! | JOY X        |   0  | ADC1_CH0                                                    |
+//! | JOY Y        |   1  | ADC1_CH1                                                    |
+//! | JOY BTN      |  10  | Active-low, internal pull-up                                |
+//! | UART0 TX     |  20  | esp-println debug output — do NOT reassign                  |
+//! | UART0 RX     |  21  | UART0 RX — do NOT reassign                                  |
 //!
 //! # WiFi
 //!
@@ -51,9 +68,6 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
-// Pull in the global allocator supplied by esp-alloc.
-// This must appear *before* `esp_hal::init()` so the heap is available for
-// the WiFi stack and smoltcp socket buffers.
 extern crate alloc;
 
 use core::panic::PanicInfo;
@@ -81,14 +95,13 @@ use log::info;
 
 use path_following_robot::{
     adapters::esp32::{
-        drv8833::Drv8833, joystick::Esp32Joystick, lcd1602::Lcd1602, tca9548a::Tca9548a,
+        drv8833::Drv8833, joystick::Esp32Joystick, tca9548a::Tca9548a,
         uln2003::Uln2003, vl53l0x::Vl53l0xOnMux, wifi::WifiAdapter,
     },
     config::{
-        I2C_FREQ_HZ, LCD_D4_GPIO, LCD_D5_GPIO, LCD_D6_GPIO, LCD_D7_GPIO, LCD_EN_GPIO, LCD_RS_GPIO,
-        LOOP_MS, PWM_FREQ_HZ, STEPPER_IN1_GPIO, STEPPER_IN2_GPIO, STEPPER_IN3_GPIO,
-        STEPPER_IN4_GPIO, TCA9548A_ADDR, VL53L0X_LEFT_CHANNEL, VL53L0X_RIGHT_CHANNEL,
-        WIFI_HEAP_SIZE,
+        I2C_FREQ_HZ, LOOP_MS, PWM_FREQ_HZ, STEPPER_IN1_GPIO, STEPPER_IN2_GPIO,
+        STEPPER_IN3_GPIO, STEPPER_IN4_GPIO, TCA9548A_ADDR,
+        VL53L0X_LEFT_CHANNEL, VL53L0X_RIGHT_CHANNEL, WIFI_HEAP_SIZE,
     },
     domain::robot::Robot,
 };
@@ -127,15 +140,12 @@ fn main() -> ! {
     #[cfg(not(debug_assertions))]
     esp_println::logger::init_logger(log::LevelFilter::Info);
 
-    info!("=== path-following-robot booting ===");
+    info!("=== path-following-robot-c3 booting (ESP32-C3) ===");
 
     // ── LEDC / Motor PWM ────────────────────────────────────────────────────
     //
-    // `timer0` must outlive all channels that hold `&timer0`.
-    // Since all locals live for the entire `main()` run, the borrow checker
-    // enforces the correct ordering without unsafe code.
-    //
-    // ChannelIFace + TimerIFace must be in scope for `.configure()` / `.set_duty()`.
+    // ESP32-C3 has 6 LEDC low-speed channels; we use 4 (CH0–CH3) for the
+    // DRV8833 inputs.  The API is identical to the ESP32.
 
     let mut ledc = Ledc::new(peripherals.LEDC);
     ledc.set_global_slow_clock(LSGlobalClkSource::APBClk);
@@ -149,7 +159,7 @@ fn main() -> ! {
         })
         .expect("LEDC timer0 configure failed");
 
-    let mut ch_ain1 = ledc.channel::<LowSpeed>(channel::Number::Channel0, peripherals.GPIO25);
+    let mut ch_ain1 = ledc.channel::<LowSpeed>(channel::Number::Channel0, peripherals.GPIO3);
     ch_ain1
         .configure(channel::config::Config {
             timer: &timer0,
@@ -158,7 +168,7 @@ fn main() -> ! {
         })
         .expect("LEDC ch_ain1 configure failed");
 
-    let mut ch_ain2 = ledc.channel::<LowSpeed>(channel::Number::Channel1, peripherals.GPIO26);
+    let mut ch_ain2 = ledc.channel::<LowSpeed>(channel::Number::Channel1, peripherals.GPIO4);
     ch_ain2
         .configure(channel::config::Config {
             timer: &timer0,
@@ -167,7 +177,7 @@ fn main() -> ! {
         })
         .expect("LEDC ch_ain2 configure failed");
 
-    let mut ch_bin1 = ledc.channel::<LowSpeed>(channel::Number::Channel2, peripherals.GPIO32);
+    let mut ch_bin1 = ledc.channel::<LowSpeed>(channel::Number::Channel2, peripherals.GPIO5);
     ch_bin1
         .configure(channel::config::Config {
             timer: &timer0,
@@ -176,7 +186,7 @@ fn main() -> ! {
         })
         .expect("LEDC ch_bin1 configure failed");
 
-    let mut ch_bin2 = ledc.channel::<LowSpeed>(channel::Number::Channel3, peripherals.GPIO33);
+    let mut ch_bin2 = ledc.channel::<LowSpeed>(channel::Number::Channel3, peripherals.GPIO6);
     ch_bin2
         .configure(channel::config::Config {
             timer: &timer0,
@@ -185,37 +195,32 @@ fn main() -> ! {
         })
         .expect("LEDC ch_bin2 configure failed");
 
-    info!("LEDC: 4 × 8-bit channels @ {} Hz", PWM_FREQ_HZ);
+    info!("LEDC: 4 × 8-bit channels @ {} Hz (GPIO3,4,5,6)", PWM_FREQ_HZ);
 
     // ── Motor adapter ────────────────────────────────────────────────────────
     let motors = Drv8833::new(ch_ain1, ch_ain2, ch_bin1, ch_bin2);
 
     // ── I2C bus (shared by TCA9548A mux + both VL53L0X sensors) ───────────────
     //
-    // `i2c_cell` is declared before the adapters that borrow it so that Rust's
-    // drop order guarantees the I2C peripheral outlives all borrowers.
-    // `RefCell` gives us a safe shared-mutability handle in this single-threaded
-    // composition root (no RTOS tasks, no interrupts touching I2C).
+    // GPIO8 is a strapping pin but the I2C external pull-up holds it high at
+    // boot, satisfying the "ROM log disabled" default.
     let i2c_cell = RefCell::new(
         I2c::new(
             peripherals.I2C0,
             I2cConfig::default().with_frequency(Rate::from_hz(I2C_FREQ_HZ)),
         )
         .expect("I2C init failed")
-        .with_sda(peripherals.GPIO21)
-        .with_scl(peripherals.GPIO22),
+        .with_sda(peripherals.GPIO7)
+        .with_scl(peripherals.GPIO8),
     );
-    info!("I2C: SDA=GPIO21  SCL=GPIO22  freq={}Hz", I2C_FREQ_HZ);
+    info!("I2C: SDA=GPIO7  SCL=GPIO8  freq={}Hz", I2C_FREQ_HZ);
 
     // ── TCA9548A multiplexer ─────────────────────────────────────────────────
     let mux = Tca9548a::new(&i2c_cell, TCA9548A_ADDR);
     info!("TCA9548A: addr=0x{:02X}", TCA9548A_ADDR);
 
     // ── VL53L0X ToF LIDARs (via mux channels 0 and 1) ───────────────────────
-    //
-    // Both sensors have the fixed address 0x29.  The mux keeps them isolated:
-    // only the selected channel is active during each I2C transaction.
-    let _ = mux; // Mux is used inside Vl53l0xOnMux::init – no further direct use needed.
+    let _ = mux;
     let lidar_l = Vl53l0xOnMux::init(&i2c_cell, TCA9548A_ADDR, VL53L0X_LEFT_CHANNEL);
     let lidar_r = Vl53l0xOnMux::init(&i2c_cell, TCA9548A_ADDR, VL53L0X_RIGHT_CHANNEL);
     info!(
@@ -223,66 +228,55 @@ fn main() -> ! {
         VL53L0X_LEFT_CHANNEL, VL53L0X_RIGHT_CHANNEL
     );
 
-    // ── ADC – Joystick axes ─────────────────────────────────────────────────
+    // ── ADC — Joystick axes ─────────────────────────────────────────────────
     //
-    // GPIO36 (VP) / GPIO39 (VN) are input-only; no pull resistor needed.
-    // 11 dB attenuation → 0–3.3 V full-scale (12-bit → 0–4095).
-
+    // ESP32-C3 ADC1 channels: CH0=GPIO0, CH1=GPIO1.
+    // No internal pull resistors on ADC pins — leave floating for joystick.
+    // 11 dB attenuation → 0–3.3 V full-scale.
     let mut adc_config = AdcConfig::new();
-    let joy_x_pin = adc_config.enable_pin(peripherals.GPIO36, Attenuation::_11dB);
-    let joy_y_pin = adc_config.enable_pin(peripherals.GPIO39, Attenuation::_11dB);
+    let joy_x_pin = adc_config.enable_pin(peripherals.GPIO0, Attenuation::_11dB);
+    let joy_y_pin = adc_config.enable_pin(peripherals.GPIO1, Attenuation::_11dB);
     let adc1 = Adc::new(peripherals.ADC1, adc_config);
-
-    info!("ADC: joystick X=GPIO36  Y=GPIO39");
+    info!("ADC: joystick X=GPIO0 (ADC1_CH0)  Y=GPIO1 (ADC1_CH1)");
 
     // ── Button ───────────────────────────────────────────────────────────────
-    // GPIO27 supports the internal pull-up; active-low.
+    // GPIO10 has no special function and supports the internal pull-up.
     let btn = Input::new(
-        peripherals.GPIO27,
+        peripherals.GPIO10,
         InputConfig::default().with_pull(Pull::Up),
     );
-    info!("Button: GPIO27 (active-low, internal pull-up)");
+    info!("Button: GPIO10 (active-low, internal pull-up)");
 
     // ── Joystick adapter ─────────────────────────────────────────────────────
     let joystick = Esp32Joystick::new(adc1, joy_x_pin, joy_y_pin, btn);
 
     // ── WiFi adapter ─────────────────────────────────────────────────────────
     //
-    // esp-rtos must be started before esp-radio so that WiFi ISR tasks run in
-    // the background and `connect_async()` can resolve.  TIMG1 is used here so
-    // that TIMG0 (consumed by LEDC above) is not double-used.
+    // esp-rtos and esp-radio use the same API on ESP32-C3 as on ESP32.
+    // TIMG1 is used so TIMG0 (LEDC above) is not double-used.
     let timg1 = TimerGroup::new(peripherals.TIMG1);
     let sw_int = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timg1.timer0, sw_int.software_interrupt0);
 
     let rng = Rng::new();
-    let _ = rng; // RNG is no longer passed to WiFi; kept for potential future use.
+    let _ = rng;
     let wifi = WifiAdapter::connect(peripherals.WIFI);
 
-    // ── LCD 1602 (HD44780, 4-bit parallel) ──────────────────────────────────
-    let lcd = Lcd1602::new(
-        Output::new(peripherals.GPIO5, Level::Low, OutputConfig::default()), // RS
-        Output::new(peripherals.GPIO4, Level::Low, OutputConfig::default()), // EN
-        Output::new(peripherals.GPIO13, Level::Low, OutputConfig::default()), // D4
-        Output::new(peripherals.GPIO14, Level::Low, OutputConfig::default()), // D5
-        Output::new(peripherals.GPIO15, Level::Low, OutputConfig::default()), // D6
-        Output::new(peripherals.GPIO2, Level::Low, OutputConfig::default()), // D7
-    );
-    info!(
-        "LCD1602: RS={} EN={} D4-D7={},{},{},{}",
-        LCD_RS_GPIO, LCD_EN_GPIO, LCD_D4_GPIO, LCD_D5_GPIO, LCD_D6_GPIO, LCD_D7_GPIO
-    );
-
-    // ── ULN2003 stepper driver (standalone — not part of Robot FSM) ──────────
+    // ── ULN2003 stepper driver ────────────────────────────────────────────────
     //
-    // The stepper is wired up here for completeness; call `stepper.step(n)` /
-    // `stepper.release()` directly in the main loop if calibration moves or
-    // pre-programmed sequences are needed.
+    // GPIO2 (IN1) is a strapping pin for JTAG mode selection.  The ULN2003
+    // input presents high-impedance during chip reset, so an external 10 kΩ
+    // pull-up resistor from GPIO2 to 3.3 V is REQUIRED to keep the chip in
+    // normal (non-JTAG) mode.  Once the LEDC driver starts, it overrides the
+    // resistor.
+    //
+    // GPIO9 (IN2) is the BOOT strapping pin; its internal pull-up keeps it
+    // high under normal conditions — no external resistor needed here.
     let _stepper = Uln2003::new(
-        Output::new(peripherals.GPIO18, Level::Low, OutputConfig::default()), // IN1
-        Output::new(peripherals.GPIO19, Level::Low, OutputConfig::default()), // IN2
-        Output::new(peripherals.GPIO23, Level::Low, OutputConfig::default()), // IN3
-        Output::new(peripherals.GPIO12, Level::Low, OutputConfig::default()), // IN4
+        Output::new(peripherals.GPIO2, Level::Low, OutputConfig::default()), // IN1
+        Output::new(peripherals.GPIO9, Level::Low, OutputConfig::default()), // IN2
+        Output::new(peripherals.GPIO18, Level::Low, OutputConfig::default()), // IN3
+        Output::new(peripherals.GPIO19, Level::Low, OutputConfig::default()), // IN4
     );
     info!(
         "ULN2003: IN1-IN4={},{},{},{}",
@@ -290,9 +284,11 @@ fn main() -> ! {
     );
 
     // ── Robot aggregate ──────────────────────────────────────────────────────
-    let mut robot = Robot::new_full(motors, lidar_l, lidar_r, joystick, wifi, lcd);
+    //
+    // `new_with_wifi` uses `NoDisplay` as the default `D` type parameter.
+    let mut robot = Robot::new_with_wifi(motors, lidar_l, lidar_r, joystick, wifi);
 
-    info!("Robot ready — entering main loop at ~100 Hz");
+    info!("Robot ready (C3) — entering main loop at ~100 Hz");
 
     // ── Boot reference time ──────────────────────────────────────────────────
     let boot = Instant::now();

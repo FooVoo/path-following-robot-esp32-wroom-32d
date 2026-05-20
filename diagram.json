@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "author": "path-following-robot",
+  "editor": "wokwi",
+  "parts": [
+    {
+      "type": "wokwi-esp32-devkit-v1",
+      "id": "esp",
+      "top": 0,
+      "left": 20,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-lcd1602",
+      "id": "lcd1",
+      "top": -150,
+      "left": 230,
+      "attrs": { "pins": "full" }
+    },
+    {
+      "type": "wokwi-analog-joystick",
+      "id": "joy1",
+      "top": -150,
+      "left": -290,
+      "attrs": {}
+    }
+  ],
+  "connections": [
+    ["esp:3V3",   "lcd1:VDD", "red",    []],
+    ["esp:GND.1", "lcd1:VSS", "black",  []],
+    ["esp:GND.1", "lcd1:V0",  "black",  []],
+    ["esp:GND.1", "lcd1:RW",  "black",  []],
+    ["esp:3V3",   "lcd1:A",   "red",    []],
+    ["esp:GND.1", "lcd1:K",   "black",  []],
+    ["esp:D5",    "lcd1:RS",  "green",  []],
+    ["esp:D4",    "lcd1:E",   "blue",   []],
+    ["esp:D13",   "lcd1:D4",  "yellow", []],
+    ["esp:D14",   "lcd1:D5",  "orange", []],
+    ["esp:D15",   "lcd1:D6",  "purple", []],
+    ["esp:D2",    "lcd1:D7",  "brown",  []],
+    ["esp:3V3",   "joy1:VCC", "red",    []],
+    ["esp:GND.1", "joy1:GND", "black",  []],
+    ["esp:VP",    "joy1:HORZ","green",  []],
+    ["esp:VN",    "joy1:VERT","blue",   []],
+    ["esp:D27",   "joy1:SEL", "yellow", []]
+  ],
+  "dependencies": {}
+}

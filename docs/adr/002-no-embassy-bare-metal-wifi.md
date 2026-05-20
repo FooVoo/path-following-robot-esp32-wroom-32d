@@ -1,10 +1,10 @@
 # ADR-002 — No Embassy: Bare-Metal WiFi with `esp-wifi` + `smoltcp`
 
-| Field    | Value                          |
-|----------|--------------------------------|
-| Date     | 2026-05-17                     |
-| Status   | **Accepted**                   |
-| Deciders | Project team                   |
+| Field    | Value                                |
+|----------|--------------------------------------|
+| Date     | 2026-05-17                           |
+| Status   | **Accepted**                         |
+| Deciders | FooVoo                               |
 | Supersedes | *(initial draft used Embassy async)* |
 
 ---

@@ -7,7 +7,11 @@ version      = "0.1.0"
 [[bin]]
 name = "path-following-robot"
 path = "./src/bin/main.rs"
-
+# Gate this firmware binary behind the `esp-firmware` feature so that
+# `cargo test --target aarch64-apple-darwin` does not try to compile it
+# against the host target (where esp_hal is unavailable).
+# Build: cargo +esp build --features esp-firmware --bin path-following-robot
+required-features = ["esp-firmware"]
 # ── Host-side telemetry server (build with `--features host-server`) ──────────
 #
 # Only compiled for the host target.  The `required-features` guard prevents
@@ -23,12 +27,76 @@ name = "telemetry-server"
 path = "src/bin/telemetry_server.rs"
 required-features = ["host-server"]
 
+# ── Wokwi simulation binary (build with `--features sim`) ────────────────────
+#
+# Replaces I2C sensors with StubDistance and disables WiFi so the firmware
+# runs in Wokwi without TCA9548A/VL53L0X hardware.
+#
+# Build:
+#   cargo +esp build --features sim --bin path-following-robot-sim
+#   # or via alias:
+#   cargo build-sim
+[[bin]]
+name = "path-following-robot-sim"
+path = "src/bin/main_sim.rs"
+required-features = ["sim"]
+
+# ── Local dev / debug binary (build with `--features dev`) ───────────────────
+#
+# Single VL53L0X on I2C (no TCA9548A mux); WiFi replaced by NoWifi.
+# LCD displays FSM state (row 0) and LIDAR distance (row 1).
+#
+# Build:
+#   cargo +esp build --features dev --bin path-following-robot-dev
+#   # or via alias:
+#   cargo build-dev
+[[bin]]
+name = "path-following-robot-dev"
+path = "src/bin/main_dev.rs"
+required-features = ["dev"]
+
+# ── ESP32-C3 production firmware (build with `--features esp32c3-firmware`) ──
+#
+# WiFi enabled; I2C sensor mux (TCA9548A) for dual VL53L0X; no LCD (GPIO
+# budget too tight on ESP32-C3-MINI-1 modules).
+#
+# Build:
+#   cargo +esp build --features esp32c3-firmware --bin path-following-robot-c3 \
+#         --target riscv32imc-unknown-none-elf
+#   # or via alias:
+#   cargo build-firmware-c3
+[[bin]]
+name = "path-following-robot-c3"
+path = "src/bin/main_c3.rs"
+required-features = ["esp32c3-firmware"]
+
+# ── ESP32-C3 dev/debug binary (build with `--features esp32c3-dev`) ──────────
+#
+# Single VL53L0X (no mux); no WiFi; no LCD.  Useful for breadboard testing
+# without the full hardware set.
+#
+# Build:
+#   cargo +esp build --features esp32c3-dev --bin path-following-robot-c3-dev \
+#         --target riscv32imc-unknown-none-elf
+#   # or via alias:
+#   cargo build-dev-c3
+[[bin]]
+name = "path-following-robot-c3-dev"
+path = "src/bin/main_c3_dev.rs"
+required-features = ["esp32c3-dev"]
+
 [lib]
 name = "path_following_robot"
 path = "./src/lib.rs"
 
 # ── Feature flags ──────────────────────────────────────────────────────────────
 [features]
+# Gates the production ESP32 firmware binary (main.rs).
+# Required so that `cargo test --target aarch64-apple-darwin` does not attempt
+# to compile main.rs against the host target where esp_hal is unavailable.
+# Build: cargo +esp build --features esp-firmware --bin path-following-robot
+esp-firmware = []
+
 # Enables the host-side axum telemetry server binary.
 # Do NOT enable when cross-compiling for the ESP32 target.
 host-server = [
@@ -46,11 +114,38 @@ host-server = [
     "prost/std",
 ]
 
+# Enables the Wokwi simulation binary and stub adapters.
+# Swap I2C LIDAR sensors for StubDistance; WiFi replaced by NoWifi.
+# Build: cargo +esp build --features sim --bin path-following-robot-sim
+sim = []
+
+# Enables the local dev/debug binary (single VL53L0X, real LCD, no WiFi).
+# No TCA9548A mux required; WiFi replaced by NoWifi.
+# Build: cargo +esp build --features dev --bin path-following-robot-dev
+dev = []
+
+# ── ESP32-C3 features ─────────────────────────────────────────────────────────
+#
+# Gates the production ESP32-C3 firmware binary (main_c3.rs).
+# Target: riscv32imc-unknown-none-elf
+# Build: cargo +esp build --features esp32c3-firmware --bin path-following-robot-c3 \
+#               --target riscv32imc-unknown-none-elf
+esp32c3-firmware = []
+
+# Gates the ESP32-C3 dev/debug firmware binary (main_c3_dev.rs).
+# Single VL53L0X, no WiFi, no LCD.
+# Build: cargo +esp build --features esp32c3-dev --bin path-following-robot-c3-dev \
+#               --target riscv32imc-unknown-none-elf
+esp32c3-dev = []
+
 # ── Dependencies available on ALL targets (including the host for tests) ──────
 [dependencies]
-log      = { version = "0.4", default-features = false }
-heapless = "0.8"
-nb       = "1.1"
+log          = { version = "0.4", default-features = false }
+heapless     = "0.8"
+nb           = "1.1"
+# Provides the I2c trait used by the SSD1306 I2cBorrow shim.
+# Pure Rust traits crate — compiles on any target including the host.
+embedded-hal = "1.0"
 # Protobuf runtime — used by ESP32 (encoding) and host server (decoding).
 # no_std-compatible; requires alloc (provided by esp-alloc on ESP32).
 prost    = { version = "0.13", default-features = false, features = ["prost-derive"] }
@@ -62,7 +157,7 @@ serde               = { version = "1",    features = ["derive"], optional = true
 serde_json          = { version = "1",    optional = true }
 tracing             = { version = "0.1",  optional = true }
 tracing-subscriber  = { version = "0.3",  features = ["env-filter"], optional = true }
-sqlx                = { version = "0.8",  features = ["runtime-tokio-native-tls", "postgres", "chrono", "json"], optional = true }
+sqlx                = { version = "0.8",  features = ["runtime-tokio-rustls", "postgres", "chrono", "json"], optional = true }
 tokio-stream        = { version = "0.1",  features = ["sync"], optional = true }
 chrono              = { version = "0.4",  features = ["serde"], optional = true }
 async-trait         = { version = "0.1",  optional = true }
@@ -91,11 +186,42 @@ critical-section       = "1.2.0"
 # embassy-net-driver is needed to use WifiRxToken/WifiTxToken consume() traits
 # in the smoltcp bridge.
 esp-radio         = { version = "0.18", features = ["esp32", "wifi"] }
-esp-rtos          = { version = "0.3", features = ["esp32"] }
+esp-rtos          = { version = "0.3", features = ["esp32", "esp-radio"] }
 embassy-net-driver = "0.2"
 esp-alloc         = "0.10"
 smoltcp      = { version = "0.12", default-features = false, features = [
 "alloc", "proto-ipv4", "socket-udp", "socket-dhcpv4", "medium-ethernet"] }
+# ── SSD1306 OLED display (Xtensa) ────────────────────────────────────────────
+# ssd1306 targets embedded-hal 1.0; display-interface-i2c is its I2C transport.
+ssd1306                = "0.8"
+embedded-graphics      = "0.8"
+display-interface-i2c  = "0.5"
+
+# ── ESP32-C3 / RISC-V-only dependencies ──────────────────────────────────────
+# ESP32-C3 uses a standard RISC-V core (riscv32imc-unknown-none-elf).
+# These dependencies are identical in API to the Xtensa section above but
+# carry the `esp32c3` feature flag so each crate selects the correct HAL
+# implementation.  Only one section is active at a time (Cargo gates on the
+# active build target).
+[target.'cfg(target_arch = "riscv32")'.dependencies]
+esp-hal                = { version = "=1.1.1", features = ["esp32c3", "unstable"] }
+esp-bootloader-esp-idf = { version = "0.5.0",  features = ["esp32c3"] }
+# esp-println: UART0 debug on GPIO20 (TX).  Alternatively build with
+# features = ["esp32c3", "jtag-serial", "log-04"] to use USB Serial/JTAG
+# (GPIO18/GPIO19), but that prevents those pins from being used as GPIO.
+esp-println            = { version = "0.17", features = ["esp32c3", "log-04"] }
+critical-section       = "1.2.0"
+# ── WiFi + networking (C3) ───────────────────────────────────────────────────
+esp-radio         = { version = "0.18", features = ["esp32c3", "wifi"] }
+esp-rtos          = { version = "0.3",  features = ["esp32c3", "esp-radio"] }
+embassy-net-driver = "0.2"
+esp-alloc         = "0.10"
+smoltcp      = { version = "0.12", default-features = false, features = [
+"alloc", "proto-ipv4", "socket-udp", "socket-dhcpv4", "medium-ethernet"] }
+# ── SSD1306 OLED display (RISC-V / ESP32-C3) ─────────────────────────────────
+ssd1306                = "0.8"
+embedded-graphics      = "0.8"
+display-interface-i2c  = "0.5"
 
 [profile.dev]
 # Always build with some optimisations – unoptimised code is too large for flash.

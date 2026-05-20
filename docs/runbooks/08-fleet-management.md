@@ -47,16 +47,27 @@ docker compose down -v
 
 ## 3  Quick start (binary, no Docker)
 
+> **Important:** this project's `.cargo/config.toml` sets the default build target
+> to `xtensa-esp32-none-elf`.  Always pass `--target` (or use the alias) when
+> building the server binary, otherwise the build will fail.
+
 ```bash
-# Build
-cargo build --release --features host-server --bin telemetry-server
+# Build (macOS arm64)
+cargo +stable build-server
+# Build (Linux x86_64)
+cargo +stable build-server-linux
+
+# Or explicitly:
+cargo +stable build --release --features host-server --bin telemetry-server \
+      --target aarch64-apple-darwin       # macOS arm64
+#     --target x86_64-unknown-linux-gnu   # Linux x86_64
 
 # Run without Postgres (in-memory only — data lost on restart)
-./target/release/telemetry-server
+./target/aarch64-apple-darwin/release/telemetry-server
 
 # Run with Postgres (must be running separately)
 DATABASE_URL=postgres://robots:robots@localhost/robots \
-  ./target/release/telemetry-server
+  ./target/aarch64-apple-darwin/release/telemetry-server
 ```
 
 ---

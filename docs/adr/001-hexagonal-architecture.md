@@ -1,10 +1,10 @@
 # ADR-001 — Hexagonal Architecture
 
-| Field    | Value                          |
-|----------|--------------------------------|
-| Date     | 2026-05-17                     |
-| Status   | **Accepted**                   |
-| Deciders | Project team                   |
+| Field    | Value        |
+|----------|--------------|
+| Date     | 2026-05-17   |
+| Status   | **Accepted** |
+| Deciders | FooVoo       |
 
 ---
 

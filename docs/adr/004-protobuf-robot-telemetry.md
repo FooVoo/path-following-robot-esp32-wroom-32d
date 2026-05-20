@@ -1,10 +1,10 @@
 # ADR-004 — Protocol Buffers for Robot→Server Telemetry
 
-| Field      | Value                        |
-|------------|------------------------------|
-| Date       | 2026-05-18                   |
-| Status     | **Accepted**                 |
-| Deciders   | Project team                 |
+| Field      | Value                            |
+|------------|----------------------------------|
+| Date       | 2026-05-18                       |
+| Status     | **Accepted**                     |
+| Deciders   | FooVoo                           |
 | Supersedes | JSON UDP telemetry (pre ADR-004) |
 
 ---

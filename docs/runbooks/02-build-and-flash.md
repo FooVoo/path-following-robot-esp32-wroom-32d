@@ -1,6 +1,9 @@
 # Runbook 02 — Build and Flash
 
 > **Audience:** Developers building and deploying firmware.
+>
+> **See also:** [Runbook 10 — Step-by-Step Flashing and Wiring Guide](10-flashing-and-wiring-guide.md)
+> for a full walkthrough including hardware wiring, download mode, port detection, and first-boot verification.
 
 ---
 
@@ -51,7 +54,7 @@ hardware:
 
 ```bash
 cargo +stable test --lib --target aarch64-apple-darwin
-# Expected: test result: ok. 19 passed; 0 failed
+# Expected: test result: ok. 47 passed; 0 failed
 ```
 
 ---

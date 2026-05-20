@@ -3,21 +3,23 @@
 //! # Architecture — Hexagonal / Ports-and-Adapters
 //!
 //! ```text
-//!              ┌─────────────────────────────────┐
-//!              │           domain/               │
-//!              │  state  · path  · robot (FSM)   │
-//!              └────────────┬────────────────────┘
-//!                           │  uses traits
-//!              ┌────────────▼────────────────────┐
-//!              │           ports/                │
-//!              │  MotorPort · DistancePort        │
-//!              │  InputPort                      │
-//!              └────────────┬────────────────────┘
-//!                           │  implemented by
-//!              ┌────────────▼────────────────────┐
-//!              │       adapters/esp32/            │
-//!              │  Drv8833 · TfLuna · Joystick     │
-//!              └─────────────────────────────────┘
+//!              ┌─────────────────────────────────────────────┐
+//!              │                  domain/                    │
+//!              │       state · path · robot (FSM)            │
+//!              └────────────────┬────────────────────────────┘
+//!                               │  uses traits
+//!              ┌────────────────▼────────────────────────────┐
+//!              │                  ports/                     │
+//!              │  MotorPort  · DistancePort · InputPort      │
+//!              │  DisplayPort · StepperPort                  │
+//!              │  RemoteControlPort · TelemetryPort          │
+//!              └────────────────┬────────────────────────────┘
+//!                               │  implemented by
+//!              ┌────────────────▼────────────────────────────┐
+//!              │            adapters/esp32/                  │
+//!              │  Drv8833 · Vl53l0xOnMux · Tca9548a          │
+//!              │  Lcd1602 · Uln2003 · Joystick · WifiAdapter │
+//!              └─────────────────────────────────────────────┘
 //! ```
 //!
 //! The `domain` layer has **zero** `esp_hal` imports; all HAL calls live in
@@ -35,11 +37,13 @@ pub mod ports;
 // is activated by the `host-server` feature (see Cargo.toml).
 pub mod proto;
 
-// Adapters depend on `esp-hal` and are only compiled when targeting the
-// ESP32 / Xtensa hardware.  They are excluded from host test builds so that
-// `cargo test --lib --target aarch64-apple-darwin` can run without the
-// ESP32 toolchain constraints.
-#[cfg(target_arch = "xtensa")]
+// Adapters depend on `esp-hal` and are only compiled when targeting an ESP
+// chip.  The ESP32 uses Xtensa (xtensa-esp32-none-elf) and the ESP32-C3 uses
+// RISC-V (riscv32imc-unknown-none-elf); both are handled by the same adapter
+// module since esp-hal abstractions are chip-agnostic at the API level.
+// Host test builds (aarch64-apple-darwin etc.) exclude this module entirely so
+// that `cargo test --lib` works without the ESP toolchain.
+#[cfg(any(target_arch = "xtensa", target_arch = "riscv32"))]
 pub mod adapters;
 
 // Fleet-management server — host only, behind the `host-server` feature flag.

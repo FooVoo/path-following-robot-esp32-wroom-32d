@@ -1,0 +1,14 @@
+# Wokwi simulation config for path-following-robot-sim.
+#
+# Build the ELF first:
+#   cargo +esp build --features sim --bin path-following-robot-sim
+#   # or via alias:
+#   cargo build-sim
+#
+# Then open this project in VS Code with the Wokwi extension installed,
+# or run: wokwi-cli simulate --timeout 60000
+
+[wokwi]
+version = 1
+firmware = "target/xtensa-esp32-none-elf/debug/path-following-robot-sim"
+elf      = "target/xtensa-esp32-none-elf/debug/path-following-robot-sim"

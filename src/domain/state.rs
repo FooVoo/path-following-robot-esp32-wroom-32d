@@ -17,6 +17,11 @@ pub enum RobotState {
     Avoiding,
     /// Path buffer overflowed; robot is halted and must be power-cycled.
     Halt,
+    /// Direct joystick control — all axis values pass straight to the motors.
+    ///
+    /// Entered by holding the physical button for ≥ `LONG_PRESS_MS` from `Idle`.
+    /// Exited back to `Idle` by a short button press.
+    Direct,
 }
 
 impl RobotState {
@@ -29,6 +34,7 @@ impl RobotState {
             Self::Play     => "PLAY",
             Self::Avoiding => "AVOIDING",
             Self::Halt     => "HALT",
+            Self::Direct   => "DIRECT",
         }
     }
 }

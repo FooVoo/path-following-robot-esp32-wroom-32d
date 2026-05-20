@@ -101,7 +101,7 @@ cd path-following-robot-esp32-wroom-32d
 cargo +stable test --lib --target aarch64-apple-darwin
 
 # Expected output:
-# test result: ok. 19 passed; 0 failed; 0 ignored
+# test result: ok. 47 passed; 0 failed; 0 ignored
 ```
 
 If the tests pass, the development environment is ready.

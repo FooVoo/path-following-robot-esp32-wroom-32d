@@ -15,6 +15,17 @@ fn main() {
         // `linkall.x` must be the last linker script; see esp-hal docs.
         println!("cargo:rustc-link-arg=-Tlinkall.x");
     }
+
+    // ESP32-C3 uses a RISC-V core (riscv32imc-unknown-none-elf).  Unlike the
+    // Xtensa target, there is no `-nostartfiles` rustflag needed here because
+    // riscv-rt (pulled in by esp-hal) provides the entry point via its own
+    // linker script integration.  We still need `linkall.x` which esp-hal
+    // emits via its own build.rs — but we must also register the error-
+    // handling helper so the friendly linker messages work for C3 builds.
+    if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("riscv32") {
+        linker_be_nice();
+        println!("cargo:rustc-link-arg=-Tlinkall.x");
+    }
 }
 
 fn linker_be_nice() {

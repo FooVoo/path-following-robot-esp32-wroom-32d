@@ -2,14 +2,17 @@
 
 > Bare-metal Rust firmware (`no_std`) for a LIDAR-guided path-following farm robot.  
 > The robot **records** a joystick-driven path, then **replays** it autonomously
-> while two TF-Luna LIDARs detect and avoid obstacles in real time.  
-> WiFi telemetry and remote control are included.
+> while two VL53L0X I²C LIDARs detect and avoid obstacles in real time.  
+> A TCA9548A I²C multiplexer routes both sensors over a single bus.  
+> An LCD 1602 display shows FSM state; a 28BYJ-48 stepper (ULN2003 driver) controls
+> a secondary axis.  WiFi telemetry and remote control are included.
 
 ---
 
 ## Table of contents
 
 - [Requirements](#requirements)
+- [Build variants](#build-variants)
 - [Quick start](#quick-start)
 - [How to flash](#how-to-flash)
 - [Hardware](#hardware)
@@ -37,9 +40,13 @@
 |---|---|---|
 | Microcontroller | ESP32-WROOM-32D | The `-32D` variant has 4 MB flash |
 | USB–UART adapter | CP2102 or CH340 | Usually built into dev boards |
-| Motor driver | DRV8833 | Two H-bridges; 1.5 A per channel |
+| Motor driver | DRV8833 | Dual H-bridge; 1.5 A per channel |
 | DC motors | 3–10 V, ≤1.5 A each | Two differential-drive wheels |
-| LIDAR sensors | TF-Luna × 2 | 3.3 V logic; 5 V power supply |
+| I²C multiplexer | TCA9548A or PCA9548A | Routes both LIDARs over one I²C bus |
+| LIDAR sensors | VL53L0X × 2 | I²C, 3.3 V; one per mux channel |
+| LCD display | 1602 (HD44780, no I²C backpack) | 4-bit parallel; 5 V power, 3.3 V data |
+| Stepper driver | ULN2003 breakout | Drives 28BYJ-48 unipolar stepper |
+| Stepper motor | 28BYJ-48 | 5 V unipolar; half-step mode |
 | Joystick module | Analog XY + push button | KY-023 or equivalent |
 | Power supply (logic) | 3.3 V / 500 mA | Supplied by dev board regulator |
 | Power supply (motors) | 5–10 V / 3 A | Separate rail; do not share with logic |
@@ -54,6 +61,44 @@
 | Python | 3.8 | *(optional — monitor scripts only)* |
 
 Tested on macOS 14 (arm64) and Ubuntu 22.04 (x86_64).
+
+---
+
+## Build variants
+
+The firmware ships three binary targets selectable by Cargo feature, plus a
+host-side telemetry server:
+
+| Variant | Binary | Feature | Toolchain | Hardware required | WiFi |
+|---|---|---|---|---|---|
+| **Production** | `path-following-robot` | *(default)* | `esp` | TCA9548A + 2× VL53L0X + full BOM | ✅ |
+| **Dev / debug** | `path-following-robot-dev` | `dev` | `esp` | 1× VL53L0X direct (no mux) + LCD 1602 | ❌ |
+| **Wokwi sim** | `path-following-robot-sim` | `sim` | `esp` | None — runs in Wokwi browser simulator | ❌ |
+| **Fleet server** | `telemetry-server` | `host-server` | `stable` | None (host binary) | — |
+
+```bash
+# ESP32 targets — requires: source ~/export-esp.sh
+cargo +esp build --release                                                  # production
+cargo +esp build-dev                                                        # dev
+cargo +esp build-sim                                                        # Wokwi sim
+
+# Host telemetry server — +stable required (overrides xtensa default)
+cargo +stable build-server                                                  # macOS arm64
+cargo +stable build-server-linux                                            # Linux x86_64
+# or equivalently:
+cargo +stable build --features host-server --bin telemetry-server \
+      --target aarch64-apple-darwin        # macOS arm64
+#     --target x86_64-unknown-linux-gnu    # Linux x86_64
+```
+
+> ⚠️ **Alias invocation:** `+toolchain` must come from the *caller*, not the alias
+> value — `cargo build-server` alone will not work.  Always use
+> `cargo +stable build-server` / `cargo +esp build-firmware`.
+> See [Runbook 05 — Troubleshooting](docs/runbooks/05-troubleshooting.md) for details.
+
+The **dev** variant wires a single VL53L0X directly to the I²C bus (no TCA9548A), replaces the right sensor with an `AlwaysClear` stub so the robot can exit `AVOIDING`, and shows the current FSM state + LIDAR distance on the LCD 1602.
+
+The **sim** variant replaces both I²C LIDARs with `StubDistance` stubs and omits WiFi so the firmware compiles cleanly for Wokwi.
 
 ---
 
@@ -75,7 +120,7 @@ cd path-following-robot-esp32-wroom-32d
 
 # ── 3. Verify with host unit tests (no ESP32 needed) ──────────────────────────
 cargo +stable test --lib --target aarch64-apple-darwin
-# Expected: test result: ok. 19 passed; 0 failed
+# Expected: test result: ok. 47 passed; 0 failed
 
 # ── 4. Build release firmware ─────────────────────────────────────────────────
 cargo +esp build --release
@@ -84,6 +129,8 @@ cargo +esp build --release
 espflash flash --monitor \
   target/xtensa-esp32-none-elf/release/path-following-robot
 ```
+
+> **New to the hardware?** See [Runbook 10 — Step-by-Step Flashing and Wiring Guide](docs/runbooks/10-flashing-and-wiring-guide.md) for a full walkthrough including assembly, power rails, and first-boot verification.
 
 ---
 
@@ -129,10 +176,13 @@ rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)
 …
 I (321)  path_following_robot: === path-following-robot booting ===
 I (330)  path_following_robot: LEDC: 4 × 8-bit channels @ 1000 Hz
-I (335)  path_following_robot: UART: LIDAR L=UART1/GPIO9  R=UART2/GPIO16
-I (340)  path_following_robot: ADC: joystick X=GPIO36  Y=GPIO39
-I (342)  path_following_robot: Button: GPIO27 (active-low, internal pull-up)
-I (350)  path_following_robot: WiFi connecting to "YourSSID"...
+I (335)  path_following_robot: I2C: SDA=GPIO21  SCL=GPIO22  @ 100 kHz
+I (340)  path_following_robot: TCA9548A: mux @ 0x70 — ch0=left  ch1=right
+I (345)  path_following_robot: VL53L0X left:  init OK
+I (350)  path_following_robot: VL53L0X right: init OK
+I (355)  path_following_robot: ADC: joystick X=GPIO36  Y=GPIO39
+I (357)  path_following_robot: Button: GPIO27 (active-low, internal pull-up)
+I (365)  path_following_robot: WiFi connecting to "YourSSID"...
 I (4230) path_following_robot: WiFi: connected — IP 192.168.1.42 — remote control + telemetry enabled
 I (4231) path_following_robot: Robot ready — entering main loop at ~100 Hz
 I (4232) path_following_robot: State: IDLE
@@ -160,10 +210,15 @@ log::set_max_level(log::LevelFilter::Info);   // production default
 |---|---|---|---|
 | 1 | ESP32-WROOM-32D dev board | e.g. ESP32-DevKitC-V4 | $5 |
 | 1 | DRV8833 breakout | Dual H-bridge motor driver | $2 |
-| 2 | TF-Luna | Micro LIDAR (0.2–8 m, 100 Hz) | $15 each |
+| 1 | TCA9548A or PCA9548A breakout | 8-channel I²C multiplexer | $3 |
+| 2 | VL53L0X breakout | I²C time-of-flight LIDAR (up to 2 m) | $3 each |
+| 1 | LCD 1602 (no backpack) | HD44780 character display; 4-bit parallel | $2 |
+| 1 | ULN2003 driver board | Stepper motor driver for 28BYJ-48 | $1 |
+| 1 | 28BYJ-48 stepper motor | 5 V unipolar; 64-step/rev geared | $2 |
 | 1 | KY-023 joystick | Analog XY + tactile button | $1 |
 | 2 | DC gear motor | 6 V, ≤1 A each | $4 each |
-| 1 | 5–9 V power bank or LiPo | Motor supply | — |
+| — | 4.7 kΩ resistors × 2 | I²C SDA/SCL pull-ups | < $0.10 |
+| 1 | 5–9 V power bank or LiPo | Motor + stepper + LCD supply | — |
 | — | Jumper wires, breadboard | — | — |
 
 ### Pin assignment table
@@ -174,62 +229,130 @@ log::set_max_level(log::LevelFilter::Info);   // production default
 | Motor AIN2 | 26 | LEDC PWM ch1 | Left wheel reverse |
 | Motor BIN1 | 32 | LEDC PWM ch2 | Right wheel forward |
 | Motor BIN2 | 33 | LEDC PWM ch3 | Right wheel reverse |
-| LIDAR-L RX | 9 | UART1 RX | ⚠ In WROOM flash range — remap to 22 if issues |
-| LIDAR-L TX | 10 | UART1 TX | ⚠ In WROOM flash range — remap to 23 if issues |
-| LIDAR-R RX | 16 | UART2 RX | |
-| LIDAR-R TX | 17 | UART2 TX | |
-| Joystick X | 36 (VP) | ADC1 ch0 | Input-only, no pull resistor needed |
-| Joystick Y | 39 (VN) | ADC1 ch3 | Input-only, no pull resistor needed |
+| I²C SDA | 21 | I²C | Shared bus — TCA9548A + both VL53L0X |
+| I²C SCL | 22 | I²C | 100 kHz; 4.7 kΩ pull-up to 3.3 V required |
+| LCD RS | 5 | GPIO output | Register select (cmd/data) |
+| LCD EN | 4 | GPIO output | Enable clock (data latched on falling edge) |
+| LCD D4 | 13 | GPIO output | 4-bit data bus bit 4 |
+| LCD D5 | 14 | GPIO output | 4-bit data bus bit 5 |
+| LCD D6 | 15 | GPIO output | 4-bit data bus bit 6 |
+| LCD D7 | 2 ⚠ | GPIO output | 4-bit data bus bit 7 — strapping pin; must be HIGH at reset |
+| Stepper IN1 | 18 | GPIO output | ULN2003 coil 1 |
+| Stepper IN2 | 19 | GPIO output | ULN2003 coil 2 |
+| Stepper IN3 | 23 | GPIO output | ULN2003 coil 3 |
+| Stepper IN4 | 12 ⚠ | GPIO output | ULN2003 coil 4 — strapping pin; must be LOW at reset |
+| Joystick X | 36 (VP) | ADC1 ch0 | Input-only; no pull resistor needed |
+| Joystick Y | 39 (VN) | ADC1 ch3 | Input-only; no pull resistor needed |
 | Joystick BTN | 27 | GPIO input | Active-low, internal pull-up enabled |
 
-All GPIO signals are 3.3 V.  Do **not** connect 5 V signals directly to GPIO pins.
+> ⚠ **GPIO2 (LCD D7)** is a strapping pin. The LCD bus holds it HIGH through the 4-bit bus at
+> reset — this is safe. Do **not** add an external pull-down.  
+> ⚠ **GPIO12 (Stepper IN4)** is a strapping pin. The ULN2003 output defaults LOW — safe.
+> Never add a pull-up resistor to GPIO12.
+
+All GPIO signals are 3.3 V. Do **not** connect 5 V signals directly to GPIO pins.
 
 ### Wiring diagram
 
+> A full per-component wiring reference with assembly checklist is in
+> [Runbook 06 — Hardware Wiring](docs/runbooks/06-hardware-wiring.md) and
+> [Runbook 10 — Step-by-Step Flashing and Wiring Guide](docs/runbooks/10-flashing-and-wiring-guide.md).
+
+```mermaid
+flowchart TB
+    %% ── Power sources ──────────────────────────────────────────────
+    USB[("💻 USB / PC")]
+    BATT[("🔋 Motor battery\n5–9 V")]
+
+    %% ── Power rails ────────────────────────────────────────────────
+    subgraph RAILS["⚡ Power Rails"]
+        direction LR
+        R33["3.3 V rail\n(ESP32 onboard reg)"]
+        R5["5 V VBUS\n(USB)"]
+        VM["VM rail\n(motors only)"]
+        GNDB["GND bus\n(common — all rails)"]
+    end
+
+    USB  -->|"VBUS"| R5
+    USB  -->|"via reg"| R33
+    USB  -->|"GND"| GNDB
+    BATT --> VM
+    BATT -->|"GND"| GNDB
+
+    %% ── ESP32 ──────────────────────────────────────────────────────
+    subgraph MCU["🧠 ESP32-WROOM-32D"]
+        direction TB
+        MPINS["GPIO25 AIN1 · GPIO26 AIN2\nGPIO32 BIN1 · GPIO33 BIN2\n(LEDC PWM ch0–ch3)"]
+        I2CPINS["GPIO21 SDA · GPIO22 SCL\n4.7 kΩ pull-ups → 3.3 V"]
+        LCDPINS["GPIO5 RS · GPIO4 EN\nGPIO13 D4 · GPIO14 D5\nGPIO15 D6 · GPIO2 D7 ⚠"]
+        STEPPINS["GPIO18 IN1 · GPIO19 IN2\nGPIO23 IN3 · GPIO12 IN4 ⚠"]
+        JOYPINS["GPIO36 VP X (ADC1 ch0)\nGPIO39 VN Y (ADC1 ch3)\nGPIO27 SW active-low pull-up"]
+    end
+    R33 --> MCU
+    R5  -->|"VBUS"| MCU
+
+    %% ── DRV8833 motor driver ────────────────────────────────────────
+    subgraph DRIVE["⚙ Drive Motors"]
+        DRV["DRV8833 H-bridge\nVCC=3.3V · VM=motor rail\nnSLEEP → 3.3V"]
+        ML["Left DC motor (TT)"]
+        MR["Right DC motor (TT)"]
+        DRV -->|"AOUT1/AOUT2"| ML
+        DRV -->|"BOUT1/BOUT2"| MR
+    end
+    MPINS  -->|"AIN1/2 BIN1/2"| DRV
+    R33    -->|"VCC logic"| DRV
+    VM     -->|"VM supply"| DRV
+    DRV    --> GNDB
+
+    %% ── I2C LIDAR chain ─────────────────────────────────────────────
+    subgraph LIDAR["📡 I2C LIDAR (100 kHz)"]
+        MUX["TCA9548A @ 0x70\nA0–A2 → GND\nRESET → 3.3V via 10 kΩ"]
+        VLX_L["VL53L0X Left\n0x29 @ CH0\nXSHUT → 3.3V"]
+        VLX_R["VL53L0X Right\n0x29 @ CH1\nXSHUT → 3.3V"]
+        MUX -->|"SC0/SD0"| VLX_L
+        MUX -->|"SC1/SD1"| VLX_R
+    end
+    I2CPINS -->|"SDA/SCL"| MUX
+    R33     --> MUX
+    R33     --> VLX_L
+    R33     --> VLX_R
+    MUX     --> GNDB
+    VLX_L   --> GNDB
+    VLX_R   --> GNDB
+
+    %% ── LCD 1602 ────────────────────────────────────────────────────
+    subgraph DISP["🖥 LCD 1602 (HD44780 4-bit)"]
+        LCD["LCD 1602\nRW → GND · write-only\nA → 3.3V via 100Ω · K → GND"]
+        POT["10 kΩ trimmer\nGND → wiper → V0\n(contrast)"]
+        LCD --- POT
+    end
+    LCDPINS -->|"RS/EN/D4–D7"| LCD
+    R5      -->|"VDD 5V"| LCD
+    LCD     --> GNDB
+
+    %% ── Stepper ─────────────────────────────────────────────────────
+    subgraph STEPPER["🔩 Stepper"]
+        ULN["ULN2003 driver board"]
+        SM["28BYJ-48\n5-pin JST (direct plug)"]
+        ULN -->|"5-pin JST"| SM
+    end
+    STEPPINS -->|"IN1–IN4"| ULN
+    R5       -->|"VCC 5V"| ULN
+    ULN      --> GNDB
+
+    %% ── Joystick ────────────────────────────────────────────────────
+    subgraph JOY_GRP["🕹 Joystick"]
+        JOY["KY-023\ndual-axis + push button SW"]
+    end
+    JOYPINS -->|"VRX/VRY/SW"| JOY
+    R33     -->|"VCC"| JOY
+    JOY     --> GNDB
 ```
-3.3 V rail ──────────────────────────────────────────────────────────────────┐
-GND rail   ──────────────────────────────────────────────────────────────────┤
-                                                                              │
-╔══════════════════════════╗                                                  │
-║   ESP32-WROOM-32D        ║                                                  │
-║                          ║   ┌──────────────────────────────────────────┐  │
-║  GPIO25 ─── AIN1 ────────╫──►│                                          │  │
-║  GPIO26 ─── AIN2 ────────╫──►│   DRV8833                                │  │
-║  GPIO32 ─── BIN1 ────────╫──►│   (Motor Driver)                         │  │
-║  GPIO33 ─── BIN2 ────────╫──►│                                          │  │
-║                          ║   │  AOUT1/AOUT2 ──► Left  Motor  (DC)       │  │
-║  3.3 V ──────────────────╫──►│  VCC   = 3.3 V                           │◄─┘
-║  GND   ──────────────────╫──►│  VM    = motor power (5–10 V, separate!) │
-║                          ║   │  BOUT1/BOUT2 ──► Right Motor  (DC)       │
-║                          ║   └──────────────────────────────────────────┘
-║                          ║
-║  GPIO9  ◄── TX ──────────╫────  TF-Luna LIDAR (left)
-║  GPIO10 ──► RX ──────────╫────  (TX from robot, usually not needed)
-║  3.3 V  ──────────────────╫────  VCC  (TF-Luna needs 5 V on power pin!)
-║  GND    ──────────────────╫────  GND
-║                          ║      ⚠ Use level-shifter or 5 V VIN + 3.3 V data
-║  GPIO16 ◄── TX ──────────╫────  TF-Luna LIDAR (right)
-║  GPIO17 ──► RX ──────────╫────
-║                          ║
-║  GPIO36 (VP) ◄── Xout ───╫────  KY-023 Joystick  (X axis, 0–3.3 V)
-║  GPIO39 (VN) ◄── Yout ───╫────                    (Y axis, 0–3.3 V)
-║  GPIO27      ◄── SW  ────╫────                    (button, active-low)
-║  3.3 V  ─────── VCC  ────╫────                    (VCC)
-║  GND    ─────── GND  ────╫────                    (GND)
-║                          ║
-║  USB ◄──────────────────────── USB-UART (CP2102/CH340)  flash / serial log
-╚══════════════════════════╝
 
-Motor power (5–10 V) ──► DRV8833 VM pin  (separate from logic 3.3 V rail!)
-```
-
-> **Power note:** The DRV8833 motor supply (`VM`) must come from a separate
-> 5–10 V rail (battery, power bank).  Never power motors from the ESP32 3.3 V
-> regulator — the current draw will brown out the MCU and corrupt flash writes.
-
-> **TF-Luna power note:** The TF-Luna requires **5 V** on its `VIN` power pin,
-> but its UART **data lines are 3.3 V** compatible.  Use the 5 V pin on your
-> dev board (or a separate 5 V rail) for TF-Luna VIN.
+> **Power rails:** Logic (3.3 V) and motor/stepper (5 V) must be separate.  
+> Never power motors or the 28BYJ-48 from the ESP32 3.3 V regulator.  
+> LCD VDD **must** be 5 V — 3.3 V gives dim or no display.  
+> I²C pull-ups go to 3.3 V, **not** 5 V.
 
 ---
 
@@ -239,10 +362,12 @@ Motor power (5–10 V) ──► DRV8833 VM pin  (separate from logic 3.3 V rail
 
 ```
   ┌────────────────────────────────────────────────────────────────────────────┐
-  │                        src/bin/main.rs                                     │
-  │              Composition root — ESP32 entry point                          │
-  │   Initialises peripherals, constructs adapters, owns the Robot aggregate,  │
-  │   runs the 100 Hz cooperative loop:  robot.tick(now_ms)                    │
+  │              src/bin/main.rs  (production)                                 │
+  │              src/bin/main_dev.rs  (dev / debug, feature = dev)             │
+  │              src/bin/main_sim.rs  (Wokwi, feature = sim)                   │
+  │   Composition roots — ESP32 entry points                                   │
+  │   Initialise peripherals, construct adapters, own the Robot aggregate,     │
+  │   run the 100 Hz cooperative loop:  robot.tick(now_ms)                     │
   └──────────────────────────────┬─────────────────────────────────────────────┘
                                  │ constructs & owns
   ┌──────────────────────────────▼─────────────────────────────────────────────┐
@@ -266,20 +391,24 @@ Motor power (5–10 V) ──► DRV8833 VM pin  (separate from logic 3.3 V rail
   ┌──────────▼────────────────────────┐   ┌──────────────▼──────────────────────┐
   │       ADAPTERS / esp32            │   │       ADAPTERS / esp32               │
   │                                   │   │                                      │
-  │  Drv8833         LEDC PWM × 4     │   │  WifiAdapter                        │
-  │  TfLuna (×2)     UART1 / UART2    │   │    esp-wifi (ISR-driven)             │
-  │  Esp32Joystick   ADC1 + GPIO      │   │    smoltcp 0.12 (UDP sockets)        │
-  │                                   │   │    block_on spin-loop (connect)      │
+  │  Drv8833      LEDC PWM × 4        │   │  WifiAdapter                        │
+  │  TCA9548A     I²C mux driver      │   │    esp-radio 0.18 (ISR-driven)       │
+  │  Vl53l0x (×2) via TCA9548A ch0/1  │   │    smoltcp 0.12 (UDP sockets)        │
+  │  Vl53l0xDirect  single, no mux    │   │    block_on spin-loop (connect)      │
+  │  Lcd1602      HD44780 4-bit       │   │                                      │
+  │  Uln2003      28BYJ-48 stepper    │   │                                      │
+  │  Esp32Joystick  ADC1 + GPIO       │   │                                      │
   └───────────────────────────────────┘   └──────────────────────────────────────┘
              │                                           │
   ┌──────────▼───────────────────────────────────────────▼──────────────────────┐
   │                          esp-hal  1.1.1                                      │
-  │  LEDC · UART · ADC1 · GPIO · TIMG · RNG · RADIO_CLK · WIFI peripheral       │
+  │  LEDC · I²C · ADC1 · GPIO · TIMG · RNG · RADIO_CLK · WIFI peripheral        │
   └──────────────────────────────────────────────────────────────────────────────┘
              │
   ┌──────────▼───────────────────────────────────────────────────────────────────┐
   │                     ESP32-WROOM-32D Hardware                                 │
-  │  DRV8833 motors · TF-Luna LIDARs · KY-023 joystick · 2.4 GHz WiFi           │
+  │  DRV8833 motors · TCA9548A + 2× VL53L0X · LCD 1602 · ULN2003/28BYJ-48      │
+  │  KY-023 joystick · 2.4 GHz WiFi                                              │
   └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -298,12 +427,14 @@ path-following-robot (bin)
 │   ├── ports::*            — trait definitions (zero deps)
 │   └── adapters::esp32::*  — [xtensa only]
 │       ├── esp-hal  1.1.1
-│       ├── esp-wifi ~0.14  (default-features=false, no builtin-scheduler)
+│       ├── esp-radio 0.18  (WiFi; replaces esp-wifi)
+│       ├── esp-rtos 0.3    (RTOS scheduler for WiFi background tasks)
 │       ├── smoltcp  0.12   (proto-ipv4, socket-udp, medium-ethernet)
-│       ├── esp-alloc 0.8   (global allocator for WiFi heap)
-│       └── static_cell 2
+│       ├── esp-alloc 0.10  (global allocator for WiFi heap)
+│       └── embassy-net-driver 0.2
 ├── log       0.4  (facade; backend = esp-println on device, env_logger in tests)
-└── heapless  0.8  (PathBuffer, telemetry scratch buffer)
+├── heapless  0.8  (PathBuffer, telemetry scratch buffer)
+└── prost     0.13 (protobuf telemetry encoding; no_std-compatible)
 ```
 
 ### Boot sequence
@@ -327,7 +458,19 @@ esp_hal::init(CpuClock::max())        ← 240 MHz, peripherals unlocked
 LEDC timer + 4 PWM channels           ← DRV8833 motor control ready
     │
     ▼
-UART1 (GPIO9) + UART2 (GPIO16)        ← TF-Luna LIDAR streams active
+I²C bus (SDA=21, SCL=22, 100 kHz)    ← shared bus for mux + sensors
+    │
+    ▼
+TCA9548A mux init @ 0x70              ← channel switching confirmed
+    │
+    ▼
+VL53L0X ch0 (left) + ch1 (right)     ← ToF ranging active (via mux)
+    │
+    ▼
+LCD 1602 init (4-bit, 2-line)         ← "Booting…" shown on display
+    │
+    ▼
+ULN2003 stepper GPIO init             ← coils configured, motor ready
     │
     ▼
 ADC1 (GPIO36, GPIO39) + GPIO27        ← joystick axes + button ready
@@ -355,28 +498,46 @@ loop {                                ← 100 Hz cooperative loop
                     ┌─────────────────────────────────────────────────────────┐
                     │                  button / WiFi button                   │
                     │                                                         ▼
-              ┌─────┴──┐  button   ┌────────┐  button   ┌───────┐  button  ┌──────┐
+              ┌─────┴──┐  short    ┌────────┐  button   ┌───────┐  button  ┌──────┐
   power on ──►│  IDLE  │──────────►│ RECORD │──────────►│ READY │─────────►│ PLAY │
-              └────────┘           └────────┘           └───────┘          └──┬───┘
-                                   records path                   ▲            │ obstacle
-                                   (512 cmds max)                 │            │ < 80 cm
-                                                           PLAY resumed        ▼
-                                                           when clear   ┌──────────┐
-                                                                        │ AVOIDING │
-                   ┌──────┐ ◄── path complete ──────────────────────────└──────────┘
-                   │ HALT │ ◄── buffer overflow (from RECORD)
-                   └──────┘ ◄── avoidance timeout > 10 s (from AVOIDING)
-                   (power cycle to exit)
+              └────┬───┘  press    └────────┘           └───────┘          └──┬───┘
+                   │               records path                   ▲            │ obstacle
+                   │ long press    (512 cmds max)                 │            │ < 80 cm
+                   │ (≥ 1 s)                               PLAY resumed        ▼
+                   ▼                                        when clear   ┌──────────┐
+              ┌────────┐  button                                         │ AVOIDING │
+              │ DIRECT │──────────►IDLE (coast)          ┌──────┐ ◄─────└──────────┘
+              └────────┘  press    joystick → motors      │ HALT │ ◄── path complete
+                                   (no LIDAR, no path)    │      │ ◄── buffer overflow
+                                                          │      │ ◄── avoidance timeout
+                                                          └──────┘ (power cycle to exit)
 ```
 
-| State | Motors | LIDARs | Joystick | WiFi button | WiFi throttle |
-|---|---|---|---|---|---|
-| `IDLE` | coast | ignored | ignored | → `RECORD` | ignored |
-| `RECORD` | joystick | triggers `HALT` on overflow | drives + records | → `READY` | overrides drive |
-| `READY` | coast | ignored | ignored | → `PLAY` or `IDLE` | ignored |
-| `PLAY` | replays path | → `AVOIDING` if < 80 cm | ignored | ignored | ignored |
-| `AVOIDING` | manoeuvre | clears → `PLAY` | ignored | ignored | ignored |
-| `HALT` | coast | ignored | ignored | ignored | ignored |
+| State | Motors | LIDARs | Joystick | Button | WiFi button | WiFi throttle |
+|---|---|---|---|---|---|---|
+| `IDLE` | coast | ignored | ignored | short press → `RECORD`; long press (≥1 s) → `DIRECT` | → `RECORD` | ignored |
+| `RECORD` | joystick | triggers `HALT` on overflow | drives + records | → `READY` | → `READY` | overrides drive |
+| `READY` | coast | ignored | ignored | → `PLAY` or `IDLE` | ignored | ignored |
+| `PLAY` | replays path | → `AVOIDING` if < 80 cm | ignored | ignored | ignored | ignored |
+| `AVOIDING` | manoeuvre | clears → `PLAY` | ignored | ignored | ignored | ignored |
+| `HALT` | coast | ignored | ignored | ignored | ignored | ignored |
+| `DIRECT` | joystick passthrough | ignored | drives motors directly | → `IDLE` (coast) | ignored | ignored |
+
+### LCD display
+
+The 16-character × 2-line LCD 1602 (HD44780, 4-bit parallel) is updated at the
+`TELEMETRY_INTERVAL_MS` cadence (200 ms by default).
+
+| Row | Content | Example |
+|-----|---------|---------|
+| 0 | Current FSM state name | `DIRECT` |
+| 1 — `DIRECT` state | Live left/right throttle (`{:+4}` format, always 16 chars wide) | `L +75 R -50     ` |
+| 1 — all other states | Left / right LIDAR distance in cm; `---` when sensor is absent or stale | `L 92 R 115 cm` |
+
+> **Why different row-1 formats?**  In `DIRECT` mode the operator is driving
+> manually with the joystick.  LIDAR readings are not acted on in this mode so
+> showing them would be misleading.  Displaying live throttle values lets the
+> operator verify that joystick movements are reaching the motors correctly.
 
 ---
 
@@ -393,7 +554,7 @@ All communication is on the LAN; no cloud dependency.
 
 | Field | Type | Range | Meaning |
 |---|---|---|---|
-| `s` | string | — | FSM state: `IDLE` `RECORD` `READY` `PLAY` `AVOIDING` `HALT` |
+| `s` | string | — | FSM state: `IDLE` `RECORD` `READY` `PLAY` `AVOIDING` `HALT` `DIRECT` |
 | `ll` | int | 0–1200, or −1 | Left LIDAR distance (cm); −1 = stale / sensor absent |
 | `lr` | int | 0–1200, or −1 | Right LIDAR distance (cm); −1 = stale / sensor absent |
 | `tl` | int | −100 … 100 | Left motor throttle |
@@ -444,6 +605,7 @@ after any change.
 | `PATH_CMD_INTERVAL_MS` | `20` | ms | Joystick sampling interval during RECORD |
 | `STALE_TICKS` | `50` | ticks | LIDAR ticks without data before stale |
 | `DEBOUNCE_MS` | `50` | ms | Minimum time between button events |
+| `LONG_PRESS_MS` | `1000` | ms | Hold duration (ms) to enter DIRECT mode from IDLE |
 | `LOOP_MS` | `10` | ms | Main loop period (100 Hz) |
 | `PWM_FREQ_HZ` | `1000` | Hz | DRV8833 PWM carrier frequency |
 
@@ -456,19 +618,20 @@ path-following-robot-esp32-wroom-32d/
 │
 ├── src/
 │   ├── bin/
-│   │   └── main.rs               # ESP32 entry point; composition root
-│   │                             #   — inits peripherals, constructs adapters,
-│   │                             #     runs 100 Hz cooperative loop
+│   │   ├── main.rs               # Production entry point — TCA9548A + 2× VL53L0X + WiFi
+│   │   ├── main_dev.rs           # Dev/debug entry point — 1× VL53L0X (no mux) + LCD, no WiFi
+│   │   ├── main_sim.rs           # Wokwi sim entry point — StubDistance sensors, no WiFi
+│   │   └── telemetry_server.rs   # Host-side axum telemetry server (feature = host-server)
 │   ├── lib.rs                    # Crate root; cfg-gates adapters to xtensa only
-│   ├── config.rs                 # All tunable constants (GPIOs, thresholds, WiFi)
+│   ├── config.rs                 # All tunable constants (GPIOs, thresholds, WiFi creds)
 │   │
 │   ├── domain/                   # Pure Rust — zero esp-hal imports
 │   │   ├── mod.rs
-│   │   ├── state.rs              # RobotState (6 variants) + ObstacleSide
+│   │   ├── state.rs              # RobotState (7 variants) + ObstacleSide
 │   │   ├── path.rs               # PathCommand + PathBuffer (heapless, 512 entries)
 │   │   └── robot.rs              # Robot<M,L,I,W=NoWifi> FSM aggregate
 │   │                             #   + NoWifi zero-sized type
-│   │                             #   + 19 unit tests (all run on host)
+│   │                             #   + 47 unit tests (all run on host)
 │   │
 │   ├── ports/                    # Port trait definitions — the hexagonal boundary
 │   │   ├── mod.rs
@@ -485,17 +648,31 @@ path-following-robot-esp32-wroom-32d/
 │           ├── mod.rs
 │           ├── drv8833.rs        # DRV8833 H-bridge via LEDC 8-bit PWM × 4
 │           │                     #   fast-decay mode, signed throttle [-100,100]
-│           ├── tf_luna.rs        # TF-Luna LIDAR via UART (9-byte frames, 100 Hz)
-│           │                     #   incremental parser, checksum verify, staleness
+│           ├── tca9548a.rs       # TCA9548A / PCA9548A 8-ch I²C mux driver
+│           │                     #   channel selection + reset-pin handling
+│           ├── vl53l0x.rs        # VL53L0X via TCA9548A (production — 2 sensors)
+│           │                     #   select channel, init, continuous ranging
+│           ├── vl53l0x_direct.rs # VL53L0X direct on I²C (dev variant — no mux)
+│           ├── lcd1602.rs        # LCD 1602 HD44780 4-bit adapter
+│           │                     #   init, clear, write str to row 0 / row 1
+│           ├── uln2003.rs        # ULN2003 / 28BYJ-48 stepper (half-step, 4-GPIO)
 │           ├── joystick.rs       # KY-023 joystick via ADC1 + GPIO button
 │           │                     #   dead-zone filter, debounce, centred throttle
-│           └── wifi.rs           # WifiAdapter: esp-wifi + smoltcp UDP
+│           ├── tf_luna.rs        # TF-Luna LIDAR via UART (legacy; not used in prod)
+│           └── wifi.rs           # WifiAdapter: esp-radio + smoltcp UDP
 │                                 #   block_on connect, poll_network, send_telemetry
+│
+├── proto/
+│   └── telemetry.proto           # Protobuf schema for robot telemetry frames
 │
 ├── docs/
 │   ├── adr/
 │   │   ├── 001-hexagonal-architecture.md
-│   │   └── 002-no-embassy-bare-metal-wifi.md
+│   │   ├── 002-no-embassy-bare-metal-wifi.md
+│   │   ├── 003-dhcp-dynamic-robot-ip-fixed-server.md
+│   │   ├── 004-protobuf-robot-telemetry.md
+│   │   ├── 005-i2c-bus-sharing.md
+│   │   └── 006-tca9548a-i2c-multiplexer.md
 │   └── runbooks/
 │       ├── 01-prerequisites.md
 │       ├── 02-build-and-flash.md
@@ -503,13 +680,18 @@ path-following-robot-esp32-wroom-32d/
 │       ├── 04-monitoring.md
 │       ├── 05-troubleshooting.md
 │       ├── 06-hardware-wiring.md
-│       └── 07-development-guide.md
+│       ├── 07-development-guide.md
+│       ├── 08-fleet-management.md
+│       ├── 09-simulation.md
+│       └── 10-flashing-and-wiring-guide.md   ← step-by-step guide with Mermaid diagram
 │
+├── wokwi.toml                    # Wokwi simulator component config
+├── diagram.json                  # Wokwi wiring diagram
 ├── Cargo.toml                    # Dependencies; esp-hal pinned to =1.1.1
 ├── Cargo.lock
-├── build.rs                      # esp-hal build script hook
+├── build.rs                      # prost-build + esp-hal build script hook
 ├── rust-toolchain.toml           # channel = "esp"
-├── .cargo/config.toml            # target = xtensa-esp32-none-elf
+├── .cargo/config.toml            # target = xtensa-esp32-none-elf; aliases build-dev, build-sim
 ├── Dockerfile                    # Multi-stage build for telemetry-server
 ├── docker-compose.yml            # Postgres 16 + telemetry-server
 └── .dockerignore
@@ -525,40 +707,64 @@ path-following-robot-esp32-wroom-32d/
 cargo +stable test --lib --target aarch64-apple-darwin
 ```
 
-19 tests covering all FSM state transitions and edge cases.  These run on any
+47 tests covering all FSM state transitions and edge cases.  These run on any
 macOS/Linux machine in ~5 seconds.  No ESP32 required.
 
 ```
 test domain::robot::tests::avoiding_back_phase_drives_backward ... ok
+test domain::robot::tests::avoiding_back_phase_at_exact_boundary_still_backing ... ok
 test domain::robot::tests::avoiding_both_sides_turns_right_by_convention ... ok
+test domain::robot::tests::avoiding_clear_at_exact_threshold_does_resume ... ok
 test domain::robot::tests::avoiding_left_obstacle_turns_right ... ok
+test domain::robot::tests::avoiding_none_side_defaults_to_right_turn ... ok
+test domain::robot::tests::avoiding_only_one_sensor_clear_does_not_resume ... ok
+test domain::robot::tests::avoiding_play_idx_unchanged_after_resume ... ok
 test domain::robot::tests::avoiding_resumes_play_when_clear ... ok
 test domain::robot::tests::avoiding_resume_drives_current_command ... ok
 test domain::robot::tests::avoiding_right_obstacle_turns_left ... ok
+test domain::robot::tests::avoiding_side_cleared_on_resume ... ok
 test domain::robot::tests::avoiding_timeout_triggers_halt ... ok
+test domain::robot::tests::avoiding_turn_phase_at_exact_boundary_still_turning ... ok
 test domain::robot::tests::halt_coasts_motors ... ok
+test domain::robot::tests::halt_ignores_button_press ... ok
 test domain::robot::tests::halt_repeats_coast_on_subsequent_ticks ... ok
+test domain::robot::tests::halt_zeros_motor_throttle_tracking ... ok
 test domain::robot::tests::idle_button_transitions_to_record ... ok
+test domain::robot::tests::idle_no_input_stays_idle ... ok
+test domain::robot::tests::idle_wifi_button_transitions_to_record ... ok
 test domain::robot::tests::play_advances_commands_by_duration ... ok
+test domain::robot::tests::play_both_sensors_blocked_triggers_avoiding_both ... ok
 test domain::robot::tests::play_drives_first_command_immediately ... ok
 test domain::robot::tests::play_halts_when_path_complete ... ok
+test domain::robot::tests::play_motor_driven_every_tick ... ok
+test domain::robot::tests::play_obstacle_at_exact_threshold_is_safe ... ok
 test domain::robot::tests::play_obstacle_triggers_avoiding ... ok
 test domain::robot::tests::play_stale_sensor_does_not_trigger_avoiding ... ok
 test domain::robot::tests::ready_button_with_path_transitions_to_play ... ok
+test domain::robot::tests::ready_stays_in_ready_without_input ... ok
+test domain::robot::tests::ready_wifi_button_transitions_to_play ... ok
 test domain::robot::tests::ready_with_empty_path_returns_to_idle ... ok
-test domain::robot::tests::record_button_transitions_to_ready ... ok
 test domain::robot::tests::record_buffer_overflow_triggers_halt ... ok
+test domain::robot::tests::record_builds_multiple_commands ... ok
+test domain::robot::tests::record_button_transitions_to_ready ... ok
+test domain::robot::tests::record_coasts_motors_on_transition_to_ready ... ok
+test domain::robot::tests::record_duration_ms_matches_elapsed_interval ... ok
+test domain::robot::tests::record_joystick_drives_motors_live ... ok
+test domain::robot::tests::record_remote_button_transitions_to_ready ... ok
+test domain::robot::tests::record_remote_throttle_overrides_joystick ... ok
 
-test result: ok. 19 passed; 0 failed
+test result: ok. 47 passed; 0 failed
 ```
 
 ### Cargo check (xtensa cross-compile)
 
 ```bash
-cargo +esp check
+cargo +esp check                                                    # production
+cargo +esp check --features dev  --bin path-following-robot-dev    # dev variant
+cargo +esp check --features sim  --bin path-following-robot-sim    # sim variant
 ```
 
-Verifies the xtensa-only adapter code (WiFi, LEDC, UART, ADC) compiles
+Verifies all xtensa-only adapter code (I²C, LEDC, ADC) compiles
 without a flash/run cycle.
 
 ---
@@ -570,11 +776,17 @@ without a flash/run cycle.
 | [ADR-001 — Hexagonal architecture](docs/adr/001-hexagonal-architecture.md) | Why the domain is HAL-free; generics vs dyn; NoWifi default |
 | [ADR-002 — No Embassy / bare-metal WiFi](docs/adr/002-no-embassy-bare-metal-wifi.md) | Why Embassy was removed; block_on mechanics; Cargo fix |
 | [ADR-003 — DHCP + fixed-endpoint server](docs/adr/003-dhcp-dynamic-robot-ip-fixed-server.md) | Why robots use DHCP; IP embedded in telemetry; fleet server design |
+| [ADR-004 — Protobuf telemetry](docs/adr/004-protobuf-robot-telemetry.md) | Binary telemetry encoding via prost; JSON vs protobuf trade-offs |
+| [ADR-005 — I²C bus sharing](docs/adr/005-i2c-bus-sharing.md) | Why TCA9548A mux is used; shared bus risks; pull-up placement |
+| [ADR-006 — TCA9548A multiplexer](docs/adr/006-tca9548a-i2c-multiplexer.md) | TCA9548A as required hardware; 5 alternatives evaluated; I/O budget |
+| [ADR-007 — sqlx: rustls over native-tls](docs/adr/007-sqlx-rustls-over-native-tls.md) | Why rustls replaces native-tls; eliminates openssl-sys cross-compile failure |
 | [Runbook 01 — Prerequisites](docs/runbooks/01-prerequisites.md) | Rust stable + esp toolchain; espflash; USB-UART drivers |
 | [Runbook 02 — Build & Flash](docs/runbooks/02-build-and-flash.md) | config.rs WiFi/GPIO; build commands; binary size; log levels |
 | [Runbook 03 — WiFi setup](docs/runbooks/03-wifi-setup.md) | Network topology; DHCP; firewall; Python monitor + control scripts |
 | [Runbook 04 — Monitoring](docs/runbooks/04-monitoring.md) | Log prefix legend; telemetry fields; state transitions; LIDAR health |
-| [Runbook 05 — Troubleshooting](docs/runbooks/05-troubleshooting.md) | 15+ failure scenarios: build, flash, WiFi, LIDAR, motors, FSM |
-| [Runbook 06 — Hardware wiring](docs/runbooks/06-hardware-wiring.md) | Detailed wiring guide, power rails, level-shifting |
+| [Runbook 05 — Troubleshooting](docs/runbooks/05-troubleshooting.md) | 15+ failure scenarios: build, flash, WiFi, I²C, motors, FSM |
+| [Runbook 06 — Hardware wiring](docs/runbooks/06-hardware-wiring.md) | Wiring reference; power rails; I²C pull-ups |
 | [Runbook 07 — Development guide](docs/runbooks/07-development-guide.md) | Adding sensors, porting to new MCU, extending the FSM |
 | [Runbook 08 — Fleet management server](docs/runbooks/08-fleet-management.md) | telemetry-server binary; Docker; UI; SSE; Postgres log storage |
+| [Runbook 09 — Wokwi simulation](docs/runbooks/09-simulation.md) | Wokwi config; sim feature; running firmware without hardware |
+| [Runbook 10 — Flashing and wiring guide](docs/runbooks/10-flashing-and-wiring-guide.md) | **Start here** — step-by-step assembly, power rails, Mermaid wiring diagram, flash procedure, first-boot checklist |

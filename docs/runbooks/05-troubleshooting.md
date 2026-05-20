@@ -4,6 +4,47 @@
 
 ## Build issues
 
+### `Could not find openssl via pkg-config` when building `telemetry-server`
+
+```
+Could not find openssl via pkg-config: pkg-config has not been configured to
+support cross-compilation.
+$HOST = aarch64-apple-darwin
+$TARGET = xtensa-esp32-none-elf
+openssl-sys = 0.9.x
+```
+
+**Cause:** `.cargo/config.toml` sets `[build] target = "xtensa-esp32-none-elf"` so
+that firmware builds work out of the box.  Running `cargo build --features
+host-server` without an explicit `--target` override inherits the ESP32 target,
+and `openssl-sys` (previously pulled in by sqlx's `native-tls` feature) cannot
+cross-compile to a bare-metal target.
+
+**Fix (already applied):** `sqlx` is now configured with `runtime-tokio-rustls`
+(pure-Rust TLS) instead of `runtime-tokio-native-tls`, which eliminates the
+OpenSSL dependency entirely.
+
+**Correct build commands:**
+
+```bash
+# macOS arm64
+cargo +stable build-server
+# equivalent to:
+cargo +stable build --features host-server --bin telemetry-server \
+      --target aarch64-apple-darwin
+
+# Linux x86_64
+cargo +stable build-server-linux
+# equivalent to:
+cargo +stable build --features host-server --bin telemetry-server \
+      --target x86_64-unknown-linux-gnu
+```
+
+**Never** run `cargo build --features host-server` without `--target` in this
+project — the `.cargo/config.toml` default target is `xtensa-esp32-none-elf`.
+
+---
+
 ### `error: feature __esp_wifi_builtin_scheduler not found in package esp-hal`
 
 **Cause:** `esp-wifi` default features include `builtin-scheduler`, which
@@ -49,7 +90,74 @@ source ~/export-esp.sh
 
 ---
 
-### `error[E0658]: use of unstable library feature 'xtensa_target_feature'`
+### `failed to find tool "xtensa-esp-elf-gcc"` when building firmware
+
+```
+CFLAGS_xtensa-esp32-none-elf = None
+cargo:warning=Compiler family detection failed due to error: ToolNotFound:
+  failed to find tool "xtensa-esp-elf-gcc": No such file or directory
+```
+
+**Cause:** The Xtensa GCC cross-compiler is installed under the `esp` rustup toolchain
+directory but is not on `PATH`.  This is required for any ESP32 firmware build.
+
+**Fix:** Source the environment script before any esp build:
+
+```bash
+source ~/export-esp.sh          # sets PATH and LIBCLANG_PATH
+cargo +esp build-firmware
+```
+
+Add it to your shell profile (`~/.zshrc` / `~/.bashrc`) to avoid having to do
+this manually each session:
+
+```bash
+echo 'source ~/export-esp.sh' >> ~/.zshrc
+```
+
+---
+
+### `error: no such command: +stable` (or `+esp`) when using a cargo alias
+
+```
+error: no such command: `+stable`
+help: invoke `cargo` through `rustup` to handle `+toolchain` directives
+```
+
+**Cause:** Cargo expands aliases before the rustup shim can interpret a
+`+toolchain` prefix.  An alias whose *value* begins with `+stable` or `+esp`
+will never work, regardless of how it is invoked.
+
+**Fix (already applied):** All aliases in `.cargo/config.toml` no longer embed
+`+toolchain` in their values.  The toolchain must come from the *caller*:
+
+```bash
+cargo +stable test-host          # ✅ rustup switches to stable, then expands alias
+cargo +stable build-server       # ✅
+cargo +esp    build-firmware     # ✅  (also requires source ~/export-esp.sh)
+```
+
+---
+
+### `undefined reference to 'esp_rtos_yield_task'` (and other `esp_rtos_*` symbols)
+
+```
+ld: libesp_radio.rlib: undefined reference to 'esp_rtos_yield_task'
+ld: libesp_radio.rlib: undefined reference to 'esp_rtos_semaphore_create'
+... (many more esp_rtos_* symbols)
+```
+
+**Cause:** `esp-rtos` only generates the RTOS compatibility symbols for
+`esp-radio` when its `esp-radio` Cargo feature is explicitly enabled.  Without
+it, `esp_rtos_*` are never emitted, causing link failures.
+
+**Fix (already applied):** `Cargo.toml` now enables `esp-radio` on `esp-rtos`:
+
+```toml
+esp-rtos = { version = "0.3", features = ["esp32", "esp-radio"] }
+```
+
+
 
 **Cause:** Building with the wrong toolchain (`stable` instead of `esp`).
 

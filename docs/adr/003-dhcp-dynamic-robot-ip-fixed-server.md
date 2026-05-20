@@ -1,11 +1,11 @@
 # ADR-003 — DHCP for Robot IP; Fixed-Endpoint Axum Fleet Server
 
-| Field    | Value                                          |
-|----------|------------------------------------------------|
-| Date     | 2026-05-18                                     |
-| Status   | **Accepted**                                   |
-| Deciders | Project team                                   |
-| Supersedes | Static-IP WiFi configuration (pre ADR-003)   |
+| Field    | Value                                      |
+|----------|--------------------------------------------|
+| Date     | 2026-05-18                                 |
+| Status   | **Accepted**                               |
+| Deciders | FooVoo                                     |
+| Supersedes | Static-IP WiFi configuration (pre ADR-003) |
 
 ---
 

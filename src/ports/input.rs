@@ -22,4 +22,18 @@ pub trait InputPort {
     ///
     /// The flag is cleared after this call.
     fn take_button_press(&mut self) -> bool;
+
+    /// Returns `true` while the button is physically held down.
+    ///
+    /// Unlike [`take_button_press`], this is a raw level query — it fires on
+    /// every tick the button is held and never consumes any state.  Used by
+    /// the domain layer to distinguish a long press (→ DIRECT) from a short
+    /// press (→ RECORD) in the IDLE state.
+    ///
+    /// The default implementation returns `false`, which is correct for test
+    /// mocks that only model instantaneous presses and for adapters that
+    /// cannot report raw GPIO level.
+    fn is_button_held(&self) -> bool {
+        false
+    }
 }
