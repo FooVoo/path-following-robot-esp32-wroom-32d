@@ -1,0 +1,66 @@
+/* ── Reset ─────────────────────────────────────────────────────────────────── */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin:     0;
+  padding:    0;
+}
+
+/* ── Base ──────────────────────────────────────────────────────────────────── */
+body {
+  font-family: system-ui, -apple-system, sans-serif;
+  background:  #0d1117;
+  color:       #c9d1d9;
+  padding:     1.5rem 2rem;
+  min-height:  100vh;
+}
+
+a       { color: #58a6ff; text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+.dim { color: #8b949e; }
+
+/* ── State badges ──────────────────────────────────────────────────────────── */
+.badge {
+  display:        inline-block;
+  padding:        2px 8px;
+  border-radius:  4px;
+  font-size:      .75rem;
+  font-weight:    700;
+  letter-spacing: .4px;
+}
+
+.s-IDLE     { background: #21262d; color: #8b949e; }
+.s-RECORD   { background: #3d2b00; color: #e3b341; }
+.s-READY    { background: #0c2d6b; color: #58a6ff; }
+.s-PLAY     { background: #0f2d1a; color: #3fb950; }
+.s-AVOIDING { background: #3d0c0c; color: #f85149; }
+.s-HALT     { background: #500c0c; color: #ffa198; }
+
+/* ── Data table ────────────────────────────────────────────────────────────── */
+table {
+  width:           100%;
+  border-collapse: collapse;
+  background:      #161b22;
+  border-radius:   6px;
+  overflow:        hidden;
+}
+
+th {
+  padding:        9px 14px;
+  text-align:     left;
+  font-size:      .75rem;
+  color:          #8b949e;
+  text-transform: uppercase;
+  letter-spacing: .4px;
+  background:     #1c2128;
+  border-bottom:  1px solid #30363d;
+}
+
+td {
+  padding:       9px 14px;
+  border-bottom: 1px solid #21262d;
+  font-size:     .875rem;
+}
+
+tr:hover td      { background:    #1c2128; }
+tr:last-child td { border-bottom: none; }

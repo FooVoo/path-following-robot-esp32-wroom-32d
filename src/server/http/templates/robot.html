@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Robot {ROBOT_ID}</title>
+<style>
+@@SHARED_CSS@@
+
+/* ── Robot-specific ────────────────────────────────────────────────────────── */
+h1 { color: #58a6ff; margin: .6rem 0 .25rem; font-size: 1.4rem; }
+
+h2 {
+  font-size:      .9rem;
+  font-weight:    600;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color:          #8b949e;
+  margin:         1.25rem 0 .5rem;
+}
+
+/* Override shared .badge padding for this denser layout */
+.badge { padding: 3px 10px; font-size: .78rem; }
+
+/* Robot log table is more compact with monospace content */
+th { padding: 8px 12px; font-size: .72rem; }
+td { padding: 7px 12px; font-size: .8rem; font-family: ui-monospace, monospace; }
+
+.panel {
+  background:    #161b22;
+  border:        1px solid #30363d;
+  border-radius: 6px;
+  padding:       1rem 1.25rem;
+  display:       flex;
+  gap:           2rem;
+  flex-wrap:     wrap;
+  margin:        .75rem 0;
+}
+
+.stat   { display: flex; flex-direction: column; gap: 3px; }
+.slabel { font-size: .68rem; text-transform: uppercase; color: #8b949e; letter-spacing: .4px; }
+.sval   { font-size: 1rem; font-weight: 500; }
+
+.controls { display: flex; gap: .6rem; align-items: center; margin-bottom: .5rem; }
+
+button {
+  background:    #21262d;
+  border:        1px solid #30363d;
+  color:         #c9d1d9;
+  padding:       5px 12px;
+  border-radius: 4px;
+  cursor:        pointer;
+  font-size:     .82rem;
+}
+button:hover    { background: #30363d; }
+button:disabled { opacity: .4; cursor: default; }
+
+#loginfo { color: #8b949e; font-size: .82rem; }
+</style>
+</head>
+<body>
+<a href="/">← Fleet</a>
+<h1>🤖 {ROBOT_ID}</h1>
+
+<div class="panel">
+  <div class="stat">
+    <span class="slabel">State</span>
+    <span id="ls" class="sval dim">—</span>
+  </div>
+  <div class="stat">
+    <span class="slabel">LIDAR Left</span>
+    <span id="lll" class="sval dim">—</span>
+  </div>
+  <div class="stat">
+    <span class="slabel">LIDAR Right</span>
+    <span id="llr" class="sval dim">—</span>
+  </div>
+  <div class="stat">
+    <span class="slabel">Throttle L/R</span>
+    <span id="lth" class="sval dim">—</span>
+  </div>
+  <div class="stat">
+    <span class="slabel">Uptime</span>
+    <span id="lup" class="sval dim">—</span>
+  </div>
+  <div class="stat">
+    <span class="slabel">Last Seen</span>
+    <span id="lsn" class="sval dim">—</span>
+  </div>
+</div>
+
+<h2>Telemetry Log</h2>
+<div class="controls">
+  <button id="btn-more" onclick="loadMore()">Load older</button>
+  <span id="loginfo"></span>
+</div>
+<table>
+  <thead>
+    <tr>
+      <th>Time</th>
+      <th>State</th>
+      <th>LIDAR L</th>
+      <th>LIDAR R</th>
+      <th>Thr L/R</th>
+      <th>Uptime ms</th>
+    </tr>
+  </thead>
+  <tbody id="ltbody"></tbody>
+</table>
+
+<script>
+@@SHARED_JS@@
+
+const IP      = '{ROBOT_ID}';
+const tbody   = document.getElementById('ltbody');
+const info    = document.getElementById('loginfo');
+const btnMore = document.getElementById('btn-more');
+let offset = 0, total = 0;
+const LIMIT = 100;
+
+function fmtT(iso) {
+  const d = new Date(iso);
+  return d.toLocaleTimeString() + '.' + String(d.getMilliseconds()).padStart(3, '0');
+}
+
+function logRow({ received_at, frame: f }) {
+  const ll = f.lidar_left_cm  ?? -1;
+  const lr = f.lidar_right_cm ?? -1;
+  return `<tr>
+    <td>${fmtT(received_at)}</td>
+    <td><span class="badge s-${f.state}">${f.state}</span></td>
+    <td>${ll < 0 ? '<span class="dim">—</span>' : ll + ' cm'}</td>
+    <td>${lr < 0 ? '<span class="dim">—</span>' : lr + ' cm'}</td>
+    <td>${f.throttle_left} / ${f.throttle_right}</td>
+    <td class="dim">${f.uptime_ms}</td>
+  </tr>`;
+}
+
+async function loadMore() {
+  btnMore.disabled = true;
+  const r = await fetch(`/robots/${encodeURIComponent(IP)}/logs?limit=${LIMIT}&offset=${offset}`);
+  const d = await r.json();
+  if (d.error) {
+    info.textContent = 'DB unavailable — no stored history';
+    btnMore.style.display = 'none';
+    return;
+  }
+  total   = d.total;
+  offset += d.logs.length;
+  tbody.insertAdjacentHTML('beforeend', d.logs.map(logRow).join(''));
+  info.textContent = `${offset} of ${total} entries`;
+  btnMore.disabled = offset >= total;
+}
+
+const es = new EventSource('/events');
+es.addEventListener('telemetry', e => {
+  const d = JSON.parse(e.data);
+  if (d.robot_id !== IP) return;
+  const f = d.frame;
+  document.getElementById('ls').innerHTML  = `<span class="badge s-${f.state}">${f.state}</span>`;
+  document.getElementById('lll').textContent = (f.lidar_left_cm  ?? -1) < 0 ? '—' : f.lidar_left_cm  + ' cm';
+  document.getElementById('llr').textContent = (f.lidar_right_cm ?? -1) < 0 ? '—' : f.lidar_right_cm + ' cm';
+  document.getElementById('lth').textContent = `${f.throttle_left} / ${f.throttle_right}`;
+  document.getElementById('lup').textContent = fmtU(f.uptime_ms);
+  document.getElementById('lsn').textContent = fmtA(d.timestamp);
+  tbody.insertAdjacentHTML('afterbegin', logRow({ received_at: d.timestamp, frame: f }));
+  if (offset > 0) { offset++; info.textContent = `${offset} of ${total} entries`; }
+});
+
+loadMore();
+</script>
+</body>
+</html>

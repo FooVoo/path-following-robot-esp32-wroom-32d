@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Robot Fleet</title>
+<style>
+@@SHARED_CSS@@
+
+/* ── Fleet-specific ────────────────────────────────────────────────────────── */
+h1 { color: #58a6ff; margin-bottom: .4rem; }
+
+.meta {
+  color:         #8b949e;
+  font-size:     .85rem;
+  margin-bottom: 1.25rem;
+  display:       flex;
+  gap:           1rem;
+  align-items:   center;
+}
+
+.dot {
+  width:          8px;
+  height:         8px;
+  border-radius:  50%;
+  display:        inline-block;
+  margin-right:   6px;
+  vertical-align: middle;
+}
+
+.online  { background: #3fb950; box-shadow: 0 0 6px #3fb95088; }
+.offline { background: #484f58; }
+
+.conn { font-size: .8rem; padding: 3px 10px; border-radius: 4px; }
+.live { background: #0f2d1a; color: #3fb950; }
+.dead { background: #3d0c0c; color: #f85149; }
+
+#empty {
+  text-align: center;
+  padding:    3rem;
+  color:      #484f58;
+  display:    none;
+  font-size:  .95rem;
+}
+</style>
+</head>
+<body>
+<h1>🤖 Robot Fleet</h1>
+<div class="meta">
+  <span id="conn" class="conn dead">● Connecting…</span>
+  <span id="meta-count" class="dim"></span>
+</div>
+<table>
+  <thead>
+    <tr>
+      <th>Robot</th>
+      <th>State</th>
+      <th>LIDAR L</th>
+      <th>LIDAR R</th>
+      <th>Throttle L/R</th>
+      <th>Uptime</th>
+      <th>Last Seen</th>
+    </tr>
+  </thead>
+  <tbody id="tbody"></tbody>
+</table>
+<p id="empty">No robots seen yet — waiting for telemetry…</p>
+<script>
+@@SHARED_JS@@
+
+const robots = {};
+const tbody   = document.getElementById('tbody');
+const empty   = document.getElementById('empty');
+const connEl  = document.getElementById('conn');
+const metaEl  = document.getElementById('meta-count');
+
+function isOnline(iso) {
+  return Date.now() - new Date(iso) < 10000;
+}
+
+function row(ip, { frame: f, ts }) {
+  const ll = f.lidar_left_cm  ?? -1;
+  const lr = f.lidar_right_cm ?? -1;
+  return `
+    <td>
+      <span class="dot ${isOnline(ts) ? 'online' : 'offline'}"></span>
+      <a href="/robots/${ip}">${ip}</a>
+    </td>
+    <td><span class="badge s-${f.state}">${f.state}</span></td>
+    <td>${ll < 0 ? '<span class="dim">—</span>' : ll + ' cm'}</td>
+    <td>${lr < 0 ? '<span class="dim">—</span>' : lr + ' cm'}</td>
+    <td>${f.throttle_left} / ${f.throttle_right}</td>
+    <td>${fmtU(f.uptime_ms)}</td>
+    <td class="dim">${fmtA(ts)}</td>`;
+}
+
+function upsert(ip, data) {
+  robots[ip] = data;
+  const id = 'r-' + ip.replace(/\./g, '-');
+  let tr = document.getElementById(id);
+  if (!tr) {
+    tr = document.createElement('tr');
+    tr.id = id;
+    tbody.appendChild(tr);
+    empty.style.display = 'none';
+  }
+  tr.innerHTML = row(ip, data);
+  metaEl.textContent = `${Object.keys(robots).length} robot(s)`;
+}
+
+const es = new EventSource('/events');
+es.addEventListener('telemetry', e => {
+  const d = JSON.parse(e.data);
+  upsert(d.robot_id, { frame: d.frame, ts: d.timestamp });
+});
+es.onopen  = () => { connEl.className = 'conn live'; connEl.textContent = '● Live'; };
+es.onerror = () => { connEl.className = 'conn dead'; connEl.textContent = '● Reconnecting…'; };
+
+setInterval(() => {
+  Object.keys(robots).forEach(ip => {
+    const tr = document.getElementById('r-' + ip.replace(/\./g, '-'));
+    if (tr) tr.innerHTML = row(ip, robots[ip]);
+  });
+}, 5000);
+</script>
+</body>
+</html>

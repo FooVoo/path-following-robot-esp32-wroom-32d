@@ -11,7 +11,6 @@ use serde::Deserialize;
 use crate::server::{
     domain::RobotId,
     http::state::AppState,
-    ports::FleetRepository,
 };
 
 #[derive(Deserialize)]
@@ -31,16 +30,7 @@ pub async fn robot_logs(
 ) -> impl IntoResponse {
     let robot_id = RobotId::new(&id);
 
-    // Prefer Postgres (richer history, survives restarts) if available.
-    let result = if let Some(ref pg) = state.pg_repo {
-        let logs  = pg.query_logs(&robot_id, params.limit, params.offset).await;
-        let total = pg.count_logs(&robot_id).await;
-        logs.and_then(|l| total.map(|t| (l, t)))
-    } else {
-        state.query_svc.query_logs(&robot_id, params.limit, params.offset).await
-    };
-
-    match result {
+    match state.query_logs_for(&robot_id, params.limit, params.offset).await {
         Ok((logs, total)) => Json(serde_json::json!({
             "robot_id": id,
             "total":    total,

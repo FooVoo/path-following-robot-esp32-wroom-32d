@@ -30,7 +30,7 @@ pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
 
 pub async fn list_robots(State(state): State<AppState>) -> impl IntoResponse {
     match state.query_svc.list_robots().await {
-        Ok(robots) => Json(serde_json::to_value(&robots).unwrap_or_default()).into_response(),
+        Ok(robots) => Json(robots).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("{e:?}")})),
